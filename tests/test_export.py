@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -153,18 +154,18 @@ class ExportUnitTests(unittest.TestCase):
         self.assertEqual(sorted(result), ["grace", "henry"])
 
     def test_export_pr_authors_return_data(self):
-        """export_pr_authors returns only logins from pull-request items."""
-        # Items with 'pull_request' key are PRs; those without are plain issues
+        """export_pr_authors returns logins from the /pulls endpoint."""
+        # /pulls endpoint returns PR objects directly (no 'pull_request' key needed)
         payload = [
-            {"user": {"login": "ida"}, "pull_request": {"url": "..."}},
-            {"user": {"login": "joe"}},  # plain issue — should be excluded
+            {"user": {"login": "ida"}, "number": 1, "title": "Add feature"},
+            {"user": {"login": "joe"}, "number": 2, "title": "Fix bug"},
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("repo_people.export.requests.get", return_value=_mock_response(payload)):
                 result = export.export_pr_authors(
                     owner="o", repo="r", token=None, outdir=tmpdir, return_data=True
                 )
-        self.assertEqual(result, ["ida"])
+        self.assertEqual(sorted(result), ["ida", "joe"])
 
     def test_export_fork_owners_return_data(self):
         """export_fork_owners returns list of fork owner logins."""
@@ -279,6 +280,12 @@ class Export_Tests(unittest.TestCase):
         # Create test output directory if it doesn't exist
         if not os.path.exists(cls.test_output_dir):
             os.mkdir(cls.test_output_dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Remove the test output directory and all its contents after all tests in this class."""
+        if os.path.exists(cls.test_output_dir):
+            shutil.rmtree(cls.test_output_dir)
     
     def setUp(self):
         """ Setup for individual tests. """

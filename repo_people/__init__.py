@@ -1,1 +1,1 @@
-from .repo_people import *
+from .repo_people import RepoPeople, UserDataView

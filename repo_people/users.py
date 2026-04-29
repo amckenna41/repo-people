@@ -516,7 +516,7 @@ class GitHubUserInfo:
 
     # Convenience: dict output
     def to_dict(self, **snapshot_kwargs) -> Dict[str, Any]:
-        return asdict(self.snapshot(**snapshot_kwargs))
+        return dict(sorted(asdict(self.snapshot(**snapshot_kwargs)).items()))
     
     # New export methods
     def to_csv_row(self, **snapshot_kwargs) -> List[str]:

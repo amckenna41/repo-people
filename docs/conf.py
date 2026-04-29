@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath('..'))
 project = 'repo-people'
 copyright = '2025, AJ McKenna'
 author = 'AJ McKenna'
-release = '0.1.0'
+release = '0.2.0'
 
 # -- General configuration ---------------------------------------------------
 

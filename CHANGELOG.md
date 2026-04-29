@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-04-28
+
+### Added
+
+#### `RepoPeople.compare()` — cross-repo user diff
+- New method `compare(other, user_data_self, user_data_other)` returns a dict with three keys:
+  - `"only_in_self"` — logins present in this repo but not the other.
+  - `"only_in_other"` — logins present in the other repo but not this one.
+  - `"in_both"` — logins that appear in both repos.
+- Enables competitive-intelligence workflows comparing community overlap between two repos.
+
+#### `RepoPeople.print_markdown()` — stdout Markdown table
+- New method `print_markdown(user_data, fields=None)` prints the same Markdown table format as `export_to_markdown` directly to stdout, without writing any file.
+- Accepts the same optional `fields` parameter to restrict which columns are shown.
+- Does nothing silently when `user_data` is empty.
+
+#### Role distribution in `summarise()`
+- `summarise()` now returns and prints a `"role_distribution"` key counting how many users appeared under each role (e.g. `{"contributors": 12, "stargazers": 340, ...}`).
+- Printed under a new "Role distribution" section in the formatted summary output.
+
+#### `UserDataView._clear_valid_fields_cache()` — explicit cache invalidation
+- New classmethod `_clear_valid_fields_cache()` resets the cached `frozenset` of valid field names.
+- Allows test code (or any caller that patches `UserSnapshot`) to force a recomputation on next access, preventing stale-cache bugs.
+
+### Changed
+
+#### `collect_all_usernames` — parallel role fetching
+- All role fetchers (contributors, stargazers, watchers, etc.) are now fetched **concurrently** using `ThreadPoolExecutor` instead of sequentially.
+- Result order matches the requested `roles` list for deterministic output.
+- Speeds up collection significantly for repos with many roles to fetch.
+
+#### `export_pr_authors` — switched to `/pulls` endpoint
+- `export_pr_authors` previously fetched from `/repos/{owner}/{repo}/issues` and filtered items by the presence of a `pull_request` key.
+- Now uses the dedicated `/repos/{owner}/{repo}/pulls` endpoint with `state=all`, which is more accurate, explicit, and avoids fetching issue data unnecessarily.
+
+### Fixed
+
+#### Thread safety for `failed` list in `get_user_details`
+- `failed.append(login)` in the `ThreadPoolExecutor` loop was previously called without holding the `lock`, creating a data race under `workers > 1`.
+- Now guarded by `with lock:` consistent with all other shared-state writes.
+
+#### `write_csv` dirname guard in `utils.py`
+- `os.makedirs(os.path.dirname(path), ...)` would raise `FileNotFoundError` when `path` had no directory component (e.g. `"file.csv"`), because `os.path.dirname` returns an empty string in that case.
+- Now only calls `os.makedirs` when the dirname is non-empty.
+
+#### `API_BASE_URL` and `BASE` moved to top of `export.py`
+- Both constants were defined mid-file, after the functions that use them (relying on Python's name resolution at call time rather than at definition time).
+- Moved to the top of the module, immediately after the imports, following standard Python convention.
+
+### Tests
+- Updated `test_export_pr_authors_return_data` in `test_export.py` to use `/pulls`-shaped payload (plain PR objects, no `pull_request` filter key needed).
+- Added `TestCollectAllUsernamesParallel` (5 tests): all roles returned when no filter, roles filter respected, output order matches input, invalid role raises `ValueError`, result values are lists.
+- Added `TestPrintMarkdown` (4 tests): header and row printed, empty data is silent, custom fields respected, pipe characters escaped.
+- Added `TestSummariseRoleDistribution` (3 tests): `role_distribution` key present, counts are correct, empty when no roles.
+- Added `TestCompare` (6 tests): `only_in_self`, `only_in_other`, `in_both`, all keys present, empty overlap, results sorted.
+- Added `test_cache_clear_resets_valid_fields` to `TestUserDataView`.
+
+---
+
+## [0.4.0] - 2026-04-28
+
+### Added
+
+#### `UserDataView` — dot-notation field access on the returned user dict
+- `get_users()` and `get_users_async()` now return a **`UserDataView`** instance instead of a plain `dict`.
+- `UserDataView` is a `dict` subclass — all existing dict operations (`[]`, `.keys()`, `.values()`, iteration, JSON serialisation) are fully backward compatible.
+- Any valid profile field name may be accessed via **dot notation** to retrieve that field across every collected user:
+  ```python
+  user_data = rp.get_users()
+  user_data.email_public
+  # {"alice": {"email_public": "alice@example.com"}, "bob": {"email_public": ""}, ...}
+  ```
+- Accessing a field that a user record does not contain returns `None` for that user.
+- Accessing an unrecognised attribute raises `AttributeError` listing all valid field names.
+- `UserDataView` is exported from the top-level `repo_people` package.
+
+### Tests
+- Added `TestUserDataView` (8 tests): `UserDataView` is a `dict` subclass, dot access returns correct structure for string and numeric fields, missing field returns `None`, `roles` field is accessible, invalid attribute raises `AttributeError`, `get_users()` return type is `UserDataView`, `UserDataView` is importable from top-level package.
+
+---
+
 ## [0.3.0] - 2026-04-12
 
 ### Added

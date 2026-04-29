@@ -1,9 +1,26 @@
-
-
-
 ## Usage
 
 ### Quick Start
+
+### How to get a GitHub Personal Access Token
+
+1. Sign in to [github.com](https://github.com) and go to **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
+2. Click **Generate new token (classic)**.
+3. Give the token a descriptive name and set an expiration date.
+4. Select the following scopes:
+   - `repo` — read access to repository metadata, contributors, and collaborators
+   - `read:user` — read user profile data
+   - `read:org` — read organisation membership (needed for `public_orgs`)
+5. Click **Generate token** and copy it immediately — it won't be shown again.
+6. Store it securely (e.g. in an environment variable or a secrets manager) and pass it via the `token` parameter:
+
+```python
+import os
+rp = RepoPeople("owner", "repo", token=os.environ["GITHUB_TOKEN"])
+```
+
+> **Tip:** Unauthenticated requests are limited to 60/hour. Authenticated requests allow 5,000/hour, making a token essential for any non-trivial repo.
+
 
 ```python
 from repo_people import RepoPeople
@@ -119,6 +136,24 @@ user_data = rp.get_users(include_social_accounts=True)
 # Each record gains a 'social_accounts' dict, e.g. {'linkedin': 'https://linkedin.com/in/...'}
 ```
 
+#### Dot-notation field access
+
+`get_users()` returns a `UserDataView` — a plain `dict` subclass that additionally supports dot notation to extract a single field across every user at once:
+
+```python
+user_data = rp.get_users()
+
+# Extract one field for all users
+emails    = user_data.email_public
+# {"alice": {"email_public": "alice@example.com"}, "bob": {"email_public": ""}, ...}
+
+locations = user_data.location
+followers = user_data.followers
+roles     = user_data.roles
+```
+
+All standard `dict` operations still work unchanged. Accessing an unrecognised field name raises `AttributeError` listing the valid field names.
+
 #### Analysis helpers
 
 ```python
@@ -146,189 +181,3 @@ Each user entry contains 30+ fields. See [FIELDS.md](FIELDS.md) for the full ref
 | Metadata | `roles` (populated by `get_users()`) |
 
 ---
-
-## Directories
-
-```
-repo-people/
-├── repo_people/          # Package source
-│   ├── __init__.py
-│   ├── repo_people.py    # RepoPeople class — main pipeline
-│   ├── export.py         # Role-specific username collectors (9 functions)
-│   ├── users.py          # GitHubUserInfo wrapper and UserSnapshot dataclass
-│   └── utils.py          # Shared helpers: paginate(), _headers(), write_csv()
-├── tests/                # Unit and integration tests
-│   ├── test_repo_people.py
-│   ├── test_export.py
-│   └── test_users.py
-├── docs/                 # Sphinx documentation source
-├── outputs/              # Default output directory (created at runtime)
-├── FIELDS.md             # Full output field reference
-├── CHANGELOG.md          # Version history
-├── pyproject.toml        # Package metadata and dependencies
-└── README.md
-```
-
----
-
-## Issues
-
-Bugs and feature requests are tracked on [GitHub Issues](https://github.com/amckenna41/repo-people/issues).
-
-When reporting a bug, please include:
-- Python version (`python --version`)
-- Package version (`pip show repo-people`)
-- A minimal code snippet that reproduces the issue
-- The full traceback if an exception is raised
-
----
-
-## Contact
-
-**AJ McKenna** — [amckenna41@qub.ac.uk](mailto:amckenna41@qub.ac.uk)
-
----
-
-## License
-
-[MIT](LICENSE)
-
----
-
-## References
-
-- [GitHub REST API documentation](https://docs.github.com/en/rest)
-- [PyGithub](https://pygithub.readthedocs.io/en/latest/)
-- [aiohttp](https://docs.aiohttp.org/en/stable/)
-
-
----
-
-## Installation
-
-```bash
-pip install repo-people
-```
-
-## Quick Start
-
-```python
-from repo_people import RepoPeople
-
-rp = RepoPeople("owner", "repo", token="ghp_...")
-user_data = rp.get_users(export=True)
-# Returns a dict keyed by username, with 30+ profile fields per user
-```
-
-## `RepoPeople()` Constructor
-
-```python
-RepoPeople(owner, repo, token=None, outdir=None, skip_codeowners=False, skip_collaborators=False)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `owner` | `str` | — | GitHub username or organisation that owns the repo. |
-| `repo` | `str` | — | Repository name. |
-| `token` | `str \| None` | `None` | Personal access token. Strongly recommended — validated immediately on init; raises `ConnectionError` for invalid tokens. |
-| `outdir` | `str \| None` | `"{owner}_{repo}"` | Leaf directory inside `outputs/`. All output files are written under `outputs/{outdir}/`. |
-| `skip_codeowners` | `bool` | `False` | Skip CODEOWNERS file when collecting maintainers. |
-| `skip_collaborators` | `bool` | `False` | Skip repo collaborators when collecting maintainers. |
-
-## Features
-
-- Collects users from **9 role categories** in a single call
-- Fetches **30+ profile fields** per user (bio, location, company, followers, orgs, languages, …)
-- Computes derived metrics: account age, followers/following ratio, repos/year, recently-active flag, bot detection
-- Incremental fetch with `save_each_iteration` and `resume` — safe to interrupt and restart on large repos
-- Flexible filtering: `roles`, `exclude`, `exclude_bots`, `limit`, `fields`
-- Concurrent fetching via `workers` — uses `ThreadPoolExecutor` to fetch multiple profiles in parallel
-- Opt-in social accounts via `include_social_accounts` — fetches linked LinkedIn, Mastodon, npm, and other accounts
-- Export to **JSON**, **CSV** and **Markdown** table
-- Analysis helpers: `summarise()` and `top_users()`
-- Token validated on startup — invalid or expired tokens raise `ConnectionError` immediately
-- Rate-limit progress printed every 50 users with remaining request count and reset time
-- Every output record includes a `roles` key listing which roles the user appeared under
-
-## `get_users()` Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `export` | `bool` | `False` | Write results to a JSON file. |
-| `export_csv` | `bool` | `False` | Write results to a CSV file. |
-| `save_each_iteration` | `bool` | `False` | Save after every single user fetch. |
-| `limit` | `int \| None` | `None` | Cap the number of profiles to fetch. |
-| `roles` | `list[str] \| None` | `None` (all 9) | Restrict which roles to collect. |
-| `exclude` | `list[str] \| None` | `None` | Usernames to skip. |
-| `exclude_bots` | `bool` | `False` | Skip bot accounts automatically. |
-| `resume` | `bool` | `False` | Skip users already in the output file. |
-| `verbose` | `bool` | `True` | Print progress to stdout. |
-| `fields` | `list[str] \| str \| None` | `None` (all) | Restrict which fields appear in output. Invalid names raise `ValueError` before any fetch. |
-| `include_social_accounts` | `bool` | `False` | Fetch each user's linked social accounts (LinkedIn, Mastodon, npm, …). Costs one extra API call per user. |
-| `workers` | `int` | `1` | Number of concurrent fetch threads. Increase for faster collection on large repos. |
-
-Valid `roles` values: `contributors`, `maintainers`, `stargazers`, `watchers`, `issue_authors`, `pr_authors`, `fork_owners`, `commit_authors`, `dependents`.
-
-## Examples
-
-### Filter by role
-
-```python
-# Only gather contributors and stargazers
-user_data = rp.get_users(roles=["contributors", "stargazers"])
-```
-
-### Limit, exclude, and skip bots
-
-```python
-user_data = rp.get_users(
-    limit=100,
-    exclude=["dependabot", "github-actions[bot]"],
-    exclude_bots=True,
-)
-```
-
-### Export to JSON and CSV
-
-```python
-user_data = rp.get_users(export=True, export_csv=True)
-```
-
-### Export to Markdown table
-
-```python
-rp.export_to_markdown(user_data, fields=["login", "name", "location", "followers"])
-```
-
-### Resume an interrupted run
-
-```python
-# First run
-rp.get_users(save_each_iteration=True, export=True)
-
-# Resume after interruption
-rp.get_users(save_each_iteration=True, export=True, resume=True)
-```
-
-### Analysis helpers
-
-```python
-stats = rp.summarise(user_data, top_n=5)
-# {'total': 134, 'top_locations': [('San Francisco', 18), ...], ...}
-
-leaders = rp.top_users(user_data, n=10, by="followers")
-```
-
-### Concurrent fetching
-
-```python
-# Speed up large repos by fetching profiles in parallel
-user_data = rp.get_users(workers=4)
-```
-
-### Include social accounts
-
-```python
-user_data = rp.get_users(include_social_accounts=True)
-# Each record gains a 'social_accounts' dict, e.g. {'linkedin': 'https://linkedin.com/in/...'}
-```

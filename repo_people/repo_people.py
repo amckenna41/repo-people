@@ -8,6 +8,8 @@ import threading
 import concurrent.futures
 import time
 from collections import Counter
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 warnings.filterwarnings("ignore", category=ResourceWarning)
 # Suppress PyGithub's verbose backoff messages
 logging.getLogger("github.Requester").setLevel(logging.ERROR)
@@ -16,7 +18,55 @@ from typing import Optional, List, Dict, Set
 from .users import GitHubUserInfo
 from . import export
 
-__all__ = ["RepoPeople"]
+__all__ = ["RepoPeople", "UserDataView"]
+
+
+class UserDataView(dict):
+    """
+    A ``dict`` subclass returned by :meth:`RepoPeople.get_users` and
+    :meth:`RepoPeople.get_users_async`.
+
+    Supports all standard ``dict`` operations. Additionally, any valid
+    user-profile field name can be accessed via dot notation to retrieve
+    that field across every collected user::
+
+        user_data = rp.get_users()
+        user_data.email_public
+        # {"alice": {"email_public": "alice@example.com"}, "bob": {"email_public": ""}, ...}
+
+    Raises :exc:`AttributeError` for names that are not valid profile fields.
+    """
+
+    _valid_fields: Optional[frozenset] = None
+
+    @classmethod
+    def _get_valid_fields(cls) -> frozenset:
+        if cls._valid_fields is None:
+            from .users import UserSnapshot
+            cls._valid_fields = frozenset(
+                f.name for f in dataclasses.fields(UserSnapshot)
+            ) | frozenset(["roles"])
+        return cls._valid_fields
+
+    @classmethod
+    def _clear_valid_fields_cache(cls) -> None:
+        """Reset the cached valid-fields set (useful in tests that patch UserSnapshot)."""
+        cls._valid_fields = None
+
+    def __getattr__(self, name: str):
+        # Avoid intercepting dunder/private names (prevents pickle/copy issues)
+        if name.startswith("_"):
+            raise AttributeError(name)
+        valid = self._get_valid_fields()
+        if name in valid:
+            return {
+                username: {name: record.get(name)}
+                for username, record in self.items()
+            }
+        raise AttributeError(
+            f"'UserDataView' object has no attribute {name!r}. "
+            f"Valid fields: {sorted(valid)}"
+        )
 
 
 class RepoPeople:
@@ -127,7 +177,20 @@ class RepoPeople:
         }
         # Only fetch the requested roles (lazy — avoids unnecessary API calls)
         active_roles = roles if roles is not None else list(role_fetchers)
-        return {role: role_fetchers[role]() for role in active_roles}
+
+        results: Dict[str, List[str]] = {}
+
+        def _fetch_role(role: str) -> tuple:
+            return role, role_fetchers[role]()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(active_roles), 9)) as executor:
+            futures = {executor.submit(_fetch_role, role): role for role in active_roles}
+            for future in concurrent.futures.as_completed(futures):
+                role, data = future.result()
+                results[role] = data
+
+        # Return in the same order as active_roles for deterministic output
+        return {role: results[role] for role in active_roles}
 
     # ------------------------------------------------------------------
     # Step 2 - fetch full GitHub profile for each unique user
@@ -219,7 +282,8 @@ class RepoPeople:
                                     json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
                 except Exception as e:
                     print(f"  [WARNING] Could not fetch data for {login}: {e}")
-                    failed.append(login)
+                    with lock:
+                        failed.append(login)
 
                 completed += 1
                 # Print rate-limit status every 50 users and at the end
@@ -318,6 +382,28 @@ class RepoPeople:
                 f.write("| " + " | ".join(row) + " |\n")
         return path
 
+    def print_markdown(
+        self,
+        user_data: Dict[str, dict],
+        fields: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Print a Markdown table of user data to stdout.
+
+        Produces the same table format as :meth:`export_to_markdown` but
+        writes to stdout instead of a file. Useful for quick inspection in a
+        terminal or notebook. Does nothing when user_data is empty.
+        """
+        if not user_data:
+            return
+        default_fields = ["login", "name", "location", "company", "followers", "public_repos", "html_url"]
+        cols = fields if fields is not None else default_fields
+        print("| " + " | ".join(cols) + " |")
+        print("| " + " | ".join(["---"] * len(cols)) + " |")
+        for record in user_data.values():
+            row = [str(record.get(c, "") or "").replace("|", "\\|") for c in cols]
+            print("| " + " | ".join(row) + " |")
+
     # ------------------------------------------------------------------
     # Analysis helpers
     # ------------------------------------------------------------------
@@ -374,6 +460,13 @@ class RepoPeople:
             "account_age_distribution": dict(age_bands),
         }
 
+        # Role distribution — count how many users appear under each role
+        role_distribution: Dict[str, int] = {}
+        for u in users:
+            for role in (u.get("roles") or []):
+                role_distribution[role] = role_distribution.get(role, 0) + 1
+        summary["role_distribution"] = role_distribution
+
         # Print formatted summary
         print(f"\n=== User Summary: {self.owner}/{self.repo} ===")
         print(f"  Total users : {total}")
@@ -388,6 +481,10 @@ class RepoPeople:
         print("\n  Account age distribution:")
         for band in ["< 1 year", "1–5 years", "5–10 years", "> 10 years"]:
             print(f"    {band}: {age_bands.get(band, 0)}")
+        if role_distribution:
+            print("\n  Role distribution:")
+            for role, count in sorted(role_distribution.items()):
+                print(f"    {role}: {count}")
         print()
 
         return summary
@@ -411,6 +508,38 @@ class RepoPeople:
             reverse=True,
         )
         return ranked[:n]
+
+    def compare(
+        self,
+        other: "RepoPeople",
+        user_data_self: Dict[str, dict],
+        user_data_other: Dict[str, dict],
+    ) -> Dict[str, object]:
+        """
+        Compare user populations between this repo and another ``RepoPeople`` instance.
+
+        Returns a dict with three keys:
+
+        - ``"only_in_self"``  — logins present in this repo but not the other.
+        - ``"only_in_other"`` — logins present in the other repo but not this one.
+        - ``"in_both"``       — logins that appear in both repos.
+
+        Example::
+
+            rp_a = RepoPeople("owner", "repo-a", token="ghp_...")
+            rp_b = RepoPeople("owner", "repo-b", token="ghp_...")
+            data_a = rp_a.get_users()
+            data_b = rp_b.get_users()
+            diff = rp_a.compare(rp_b, data_a, data_b)
+            print(diff["in_both"])
+        """
+        logins_self = set(user_data_self.keys())
+        logins_other = set(user_data_other.keys())
+        return {
+            "only_in_self": sorted(logins_self - logins_other),
+            "only_in_other": sorted(logins_other - logins_self),
+            "in_both": sorted(logins_self & logins_other),
+        }
 
     def get_users(
         self,
@@ -536,7 +665,7 @@ class RepoPeople:
             path = self.export_to_csv(user_data)
             print(f"Exported to: {path}")
 
-        return user_data
+        return UserDataView(user_data)
 
     # ------------------------------------------------------------------
     # Async API  (asyncio + aiohttp)
@@ -617,14 +746,23 @@ class RepoPeople:
             async with sem:
                 if verbose:
                     print(f"  Fetching: {login}")
+
+                # Helper: GET a URL and return parsed JSON, or None on non-200
+                async def _get_json(url: str, params=None):
+                    async with session.get(url, headers=headers, params=params) as r:
+                        return await r.json() if r.status == 200 else None
+
+                base_url = f"https://api.github.com/users/{login}"
                 try:
-                    async with session.get(
-                        f"https://api.github.com/users/{login}",
-                        headers=headers,
-                    ) as resp:
-                        if resp.status != 200:
-                            raise ValueError(f"HTTP {resp.status}")
-                        raw = await resp.json()
+                    # Fetch base profile, orgs, latest public event, and owned repos concurrently
+                    raw, orgs_data, events_data, repos_data = await asyncio.gather(
+                        _get_json(base_url),
+                        _get_json(f"{base_url}/orgs", {"per_page": 100}),
+                        _get_json(f"{base_url}/events/public", {"per_page": 1}),
+                        _get_json(f"{base_url}/repos", {"per_page": 50, "type": "owner"}),
+                    )
+                    if raw is None:
+                        raise ValueError("HTTP error fetching base profile")
                 except Exception as e:
                     print(f"  [WARNING] Could not fetch data for {login}: {e}")
                     failed.append(login)
@@ -634,59 +772,116 @@ class RepoPeople:
                 if exclude_bots and raw.get("type") == "Bot":
                     return
 
-                # Map REST API response to the same field names as GitHubUserInfo.to_dict()
+                # --- Derived string fields (no extra calls needed) ---
+                email = raw.get("email") or ""
+                email_domain = email.split("@", 1)[1].lower() if "@" in email else ""
+                blog = raw.get("blog") or ""
+                blog_host = (urlparse(blog).hostname or "").lower() if blog else ""
+                company = raw.get("company") or ""
+                company_normalized = company.strip().lstrip("@")
+                location = raw.get("location") or ""
+                location_normalized = location.strip().lower()
+
+                # --- Orgs ---
+                orgs_list = orgs_data if isinstance(orgs_data, list) else []
+                public_orgs = [o.get("login", "") for o in orgs_list if o.get("login")]
+
+                # --- Last public event (for recently_active, matching sync path) ---
+                events_list = events_data if isinstance(events_data, list) else []
+                last_public_event_at = events_list[0].get("created_at", "") if events_list else ""
+
+                # --- Repos: top languages + star/fork sums (matches sync default include_langs=True) ---
+                repos_list = repos_data if isinstance(repos_data, list) else []
+                lang_counts: Dict[str, int] = {}
+                total_stars = 0
+                total_forks = 0
+                for r in repos_list:
+                    lang = r.get("language")
+                    if lang:
+                        lang_counts[lang] = lang_counts.get(lang, 0) + 1
+                    total_stars += r.get("stargazers_count", 0)
+                    total_forks += r.get("forks_count", 0)
+                top_languages = sorted(lang_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+
+                # --- Computed date/ratio metrics ---
+                created_str = raw.get("created_at", "") or ""
+                updated_str = raw.get("updated_at", "") or ""
+                account_age_days = 0
+                repos_per_year = 0.0
+                if created_str:
+                    try:
+                        created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                        account_age_days = (datetime.now(timezone.utc) - created_dt).days
+                        repos_per_year = round(
+                            raw.get("public_repos", 0) / max(account_age_days / 365, 1), 2
+                        )
+                    except ValueError:
+                        pass
+
+                followers = raw.get("followers", 0) or 0
+                following = raw.get("following", 0) or 0
+                followers_following_ratio = round(
+                    followers / following if following else float(followers), 2
+                )
+
+                # recently_active uses last_public_event_at (same signal as sync path)
+                recently_active = False
+                if last_public_event_at:
+                    try:
+                        ev_dt = datetime.fromisoformat(last_public_event_at.replace("Z", "+00:00"))
+                        recently_active = (datetime.now(timezone.utc) - ev_dt).days <= 90
+                    except ValueError:
+                        pass
+
+                # --- Assemble record matching GitHubUserInfo.to_dict() field set ---
                 record = {
                     "login": raw.get("login", ""),
                     "id": raw.get("id"),
                     "node_id": raw.get("node_id", ""),
                     "type": raw.get("type", ""),
                     "name": raw.get("name") or "",
-                    "company": raw.get("company") or "",
-                    "location": raw.get("location") or "",
-                    "email_public": raw.get("email") or "",
-                    "blog": raw.get("blog") or "",
+                    "company": company,
+                    "location": location,
+                    "email_public": email,
+                    "email_domain": email_domain,
+                    "blog": blog,
+                    "blog_host": blog_host,
                     "twitter": raw.get("twitter_username") or "",
                     "bio": raw.get("bio") or "",
                     "avatar_url": raw.get("avatar_url", ""),
                     "html_url": raw.get("html_url", ""),
                     "hireable": raw.get("hireable"),
                     "site_admin": raw.get("site_admin", False),
-                    "created_at": str(raw.get("created_at", "")),
-                    "updated_at": str(raw.get("updated_at", "")),
-                    "followers": raw.get("followers", 0),
-                    "following": raw.get("following", 0),
+                    "created_at": created_str,
+                    "updated_at": updated_str,
+                    "followers": followers,
+                    "following": following,
                     "public_repos": raw.get("public_repos", 0),
                     "public_gists": raw.get("public_gists", 0),
+                    "public_orgs": public_orgs,
+                    "orgs_public_count": len(public_orgs),
                     "is_bot": raw.get("type") == "Bot",
-                    "has_public_email": bool(raw.get("email")),
-                    "has_blog": bool(raw.get("blog")),
+                    "last_public_event_at": last_public_event_at,
+                    "has_public_email": bool(email),
+                    "has_blog": bool(blog),
                     "has_twitter": bool(raw.get("twitter_username")),
+                    "company_normalized": company_normalized,
+                    "location_normalized": location_normalized,
+                    "account_age_days": account_age_days,
+                    "followers_following_ratio": followers_following_ratio,
+                    "repos_per_year": repos_per_year,
+                    "recently_active": recently_active,
+                    "top_languages": top_languages,
+                    "total_public_stars_sampled": total_stars,
+                    "total_public_forks_sampled": total_forks,
+                    # Optional fields not populated in async path (match sync defaults)
+                    "ssh_keys_count": None,
+                    "gpg_keys_count": None,
+                    "starred_repos_sampled": None,
+                    "social_accounts": None,
+                    "is_collaborator": None,
+                    "permission_on_repo": None,
                 }
-                # Compute basic derived metrics
-                from datetime import datetime, timezone
-                created_str = raw.get("created_at", "")
-                if created_str:
-                    try:
-                        created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                        age_days = (datetime.now(timezone.utc) - created).days
-                        record["account_age_days"] = age_days
-                        record["repos_per_year"] = round(
-                            record["public_repos"] / max(age_days / 365, 1), 2
-                        )
-                    except ValueError:
-                        record["account_age_days"] = 0
-                        record["repos_per_year"] = 0.0
-                following = record["following"] or 0
-                record["followers_following_ratio"] = round(
-                    record["followers"] / following if following else float(record["followers"]), 2
-                )
-                updated_str = raw.get("updated_at", "")
-                if updated_str:
-                    try:
-                        updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
-                        record["recently_active"] = (datetime.now(timezone.utc) - updated).days <= 90
-                    except ValueError:
-                        record["recently_active"] = False
 
                 if record.get("login"):
                     async with lock:
@@ -816,4 +1011,4 @@ class RepoPeople:
             path = self.export_to_csv(user_data)
             print(f"Exported to: {path}")
 
-        return user_data
+        return UserDataView(user_data)

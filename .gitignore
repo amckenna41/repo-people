@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 .env
+
+ARTICLE.md
+
+.DS_Store
+
+tests/test_output/

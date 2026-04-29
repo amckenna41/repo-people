@@ -17,19 +17,25 @@ def _headers(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Di
 
 
 def _sleep_if_ratelimited(resp: requests.Response):
-    """Sleep until the rate-limit reset time if a 403 is returned; returns 'skip' if wait is too long."""
+    """Sleep until the rate-limit window expires if a 403 or 429 is returned; returns 'skip' if wait is too long."""
     MAX_SLEEP = 60  # seconds
-    if resp.status_code == 403:
-        reset = resp.headers.get("X-RateLimit-Reset")
-        if reset and reset.isdigit():
-            wait_s = max(0, int(reset) - int(time.time()) + 1)
-            if wait_s > MAX_SLEEP:
-                print(f"Rate limit wait ({wait_s}s) exceeds maximum allowed ({MAX_SLEEP}s). Skipping request.", flush=True)
-                return "skip"
-            print(f"Hit rate limit. Sleeping for {wait_s}s...", flush=True)
-            time.sleep(wait_s)
-            return True
-    return False
+    if resp.status_code not in (403, 429):
+        return False
+    # Prefer X-RateLimit-Reset (Unix timestamp); fall back to Retry-After (seconds, used by 429)
+    reset = resp.headers.get("X-RateLimit-Reset")
+    if reset and reset.isdigit():
+        wait_s = max(0, int(reset) - int(time.time()) + 1)
+    else:
+        retry_after = resp.headers.get("Retry-After")
+        wait_s = int(retry_after) if (retry_after and retry_after.isdigit()) else 0
+    if wait_s == 0:
+        return False
+    if wait_s > MAX_SLEEP:
+        print(f"Rate limit wait ({wait_s}s) exceeds maximum allowed ({MAX_SLEEP}s). Skipping request.", flush=True)
+        return "skip"
+    print(f"Hit rate limit ({resp.status_code}). Sleeping for {wait_s}s...", flush=True)
+    time.sleep(wait_s)
+    return True
 
 
 def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, accept: Optional[str] = None) -> Iterable[Dict]:
@@ -39,12 +45,12 @@ def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, acce
     _h = _headers(token, {"Accept": accept} if accept else None)
     while url:
         resp = requests.get(url, headers=_h, params=params)
-        # Handle rate limit: sleep and retry
+        # Handle rate limit (403 / 429): sleep and retry
         rl_result = _sleep_if_ratelimited(resp)
-        while resp.status_code == 403 and rl_result is True:
+        while resp.status_code in (403, 429) and rl_result is True:
             resp = requests.get(url, headers=_h, params=params)
             rl_result = _sleep_if_ratelimited(resp)
-        if resp.status_code == 403 and rl_result == "skip":
+        if resp.status_code in (403, 429) and rl_result == "skip":
             return
         if resp.status_code == 404:
             return
@@ -69,7 +75,9 @@ def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, acce
 
 def write_csv(path: str, header: List[str], rows: Iterable[Iterable]) -> None:
     """Write a CSV file, creating parent directories as needed."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(header)

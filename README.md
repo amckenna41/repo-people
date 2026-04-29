@@ -9,7 +9,7 @@
 [![codecov](https://codecov.io/gh/amckenna41/repo-people/branch/master/graph/badge.svg?token=4PQDVGKGYN)](https://codecov.io/gh/amckenna41/repo-people)
 
 <p align="center">
-  <img src="images/logo.png" alt="repo-people logo" width="300"/>
+  <img src="https://raw.githubusercontent.com/amckenna41/repo-people/refs/heads/main/images/logo.png" alt="repo-people logo" width="300"/>
 </p>
 
 **repo-people** is a Python package that collects and exports the full GitHub profile for every person associated with a repository — contributors, maintainers, stargazers, watchers, issue/PR authors, fork owners, commit authors and dependents.
@@ -72,16 +72,16 @@ A GitHub personal access token is strongly recommended. Unauthenticated requests
 
 ## Installation
 
-Install the latest version of `pySAR` via [PyPi][PyPi] using pip:
+Install the latest version of `repo-people` via [PyPi][PyPi] using pip:
 
 ```bash
-pip3 install pysar --upgrade
+pip3 install repo-people --upgrade
 ```
 
 Installation from source:
 ```bash
-git clone -b master https://github.com/amckenna41/pySAR.git
-cd pySAR
+git clone -b main https://github.com/amckenna41/repo-people.git
+cd repo-people
 pip3 install .
 ```
 
@@ -99,6 +99,26 @@ pip3 install .
 ## Usage
 
 ### Quick Start
+
+### How to get a GitHub Personal Access Token
+
+1. Sign in to [github.com](https://github.com) and go to **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
+2. Click **Generate new token (classic)**.
+3. Give the token a descriptive name and set an expiration date.
+4. Select the following scopes:
+   - `repo` — read access to repository metadata, contributors, and collaborators
+   - `read:user` — read user profile data
+   - `read:org` — read organisation membership (needed for `public_orgs`)
+5. Click **Generate token** and copy it immediately — it won't be shown again.
+6. Store it securely (e.g. in an environment variable or a secrets manager) and pass it via the `token` parameter:
+
+```python
+import os
+rp = RepoPeople("owner", "repo", token=os.environ["GITHUB_TOKEN"])
+```
+
+> **Tip:** Unauthenticated requests are limited to 60/hour. Authenticated requests allow 5,000/hour, making a token essential for any non-trivial repo.
+
 
 ```python
 from repo_people import RepoPeople
@@ -214,6 +234,24 @@ user_data = rp.get_users(include_social_accounts=True)
 # Each record gains a 'social_accounts' dict, e.g. {'linkedin': 'https://linkedin.com/in/...'}
 ```
 
+#### Dot-notation field access
+
+`get_users()` returns a `UserDataView` — a plain `dict` subclass that additionally supports dot notation to extract a single field across every user at once:
+
+```python
+user_data = rp.get_users()
+
+# Extract one field for all users
+emails    = user_data.email_public
+# {"alice": {"email_public": "alice@example.com"}, "bob": {"email_public": ""}, ...}
+
+locations = user_data.location
+followers = user_data.followers
+roles     = user_data.roles
+```
+
+All standard `dict` operations still work unchanged. Accessing an unrecognised field name raises `AttributeError` listing the valid field names.
+
 #### Analysis helpers
 
 ```python
@@ -264,24 +302,6 @@ repo-people/
 └── README.md
 ```
 
-
-## Output Fields
-
-Each user entry contains 30+ fields including:
-
-| Category | Fields |
-|---|---|
-| Identity | `login`, `name`, `company`, `location`, `email_public`, `blog`, `twitter`, `bio` |
-| Timestamps | `created_at`, `updated_at` |
-| Counters | `followers`, `following`, `public_repos`, `public_gists` |
-| Flags | `has_public_email`, `has_blog`, `has_twitter`, `is_bot`, `hireable` |
-| Computed | `account_age_days`, `followers_following_ratio`, `repos_per_year`, `recently_active`, `last_public_event_at` |
-| Organisations | `public_orgs`, `orgs_public_count` |
-| Sampled | `top_languages`, `total_public_stars_sampled`, `total_public_forks_sampled`, `ssh_keys_count`, `gpg_keys_count`, `starred_repos_sampled` |
-| Social | `social_accounts` (opt-in via `include_social_accounts`) |
-| Repo-specific | `is_collaborator`, `permission_on_repo` |
-| Metadata | `roles` (populated by `get_users()`) |
-
 <!-- ## Authentication
 
 A GitHub token is strongly recommended (5 000 vs 60 requests/hour unauthenticated):
@@ -291,25 +311,18 @@ import os
 rp = RepoPeople("owner", "repo", token=os.environ["GITHUB_TOKEN"])
 ``` -->
 
+
+
 ## Issues
-
-Bugs and feature requests are tracked on [GitHub Issues](https://github.com/amckenna41/repo-people/issues).
-
-When reporting a bug, please include:
-- Python version (`python --version`)
-- Package version (`pip show repo-people`)
-- A minimal code snippet that reproduces the issue
-- The full traceback if an exception is raised
-
-## License
-
-Distributed under the MIT License. See [MIT](LICENSE) for more details.  
+Any issues, errors or bugs can be raised via the [Issues](https://github.com/amckenna41/repo-people/issues) tab in the repository.
 
 ## Contact
+If you have any questions or comments, please contact amckenna41@qub.ac.uk or raise an issue on the [Issues][Issues] tab. <br><br>
+<!-- [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/adam-mckenna-7a5b22151/) -->
 
-**AJ McKenna** — [amckenna41@qub.ac.uk](mailto:amckenna41@qub.ac.uk)
+## License
+Distributed under the MIT License. See [`LICENSE`][license] for more details. 
 
------ 
 
 
 [<img src="https://img.shields.io/github/stars/amckenna41/repo-people?color=green&label=star%20it%20on%20GitHub" width="132" height="20" alt="Star it on GitHub">](https://github.com/amckenna41/repo-people)
@@ -318,3 +331,7 @@ Distributed under the MIT License. See [MIT](LICENSE) for more details.
 <a href="https://www.buymeacoffee.com/amckenna41" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
 
 [Back to top](#TOP)
+
+[PyPi]: https://pypi.org/project/repo-people
+[Issues]: https://github.com/amckenna41/repo-people/issues
+[license]: https://github.com/amckenna41/repo-people/blob/master/LICENSE

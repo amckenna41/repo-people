@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "repo-people"
-version = "0.1.0"
+version = "0.2.0"
 description = "Collect and export full GitHub user profile data for everyone associated with a repository."
 authors = ["AJ McKenna <amckenna41@qub.ac.uk>"]
 maintainers = ["AJ McKenna <amckenna41@qub.ac.uk>"]

@@ -9,6 +9,9 @@ from urllib.parse import urljoin
 
 from .utils import _headers, _sleep_if_ratelimited, paginate, write_csv
 
+API_BASE_URL = "https://api.github.com"
+BASE = "https://github.com"
+
 
 def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
     """
@@ -33,7 +36,6 @@ def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: s
     return len(usernames)
 
 
-BASE = "https://github.com"
 def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = False, export_csv: bool = False, limit: int = None, sleep: float = 1.0):
     """
     Scrape and export the list of dependent users (usernames) for a repo to CSV and/or return as list.
@@ -96,10 +98,6 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Fa
     if return_data:
         return usernames
     return len(usernames)
-
-#** can only get top 100 contributors.
-API_BASE_URL = "https://api.github.com"
-
 
 def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
     """
@@ -219,15 +217,14 @@ def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: st
 
 
 def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
-    url = f"{API_BASE_URL}/repos/{owner}/{repo}/issues"
+    url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls"
     usernames = set()
     try:
-        for it in paginate(url, token, params={"state": "all"}):
-            if "pull_request" in it:
-                u = it.get("user") or {}
-                login = u.get("login")
-                if login:
-                    usernames.add(login)
+        for pr in paginate(url, token, params={"state": "all"}):
+            u = pr.get("user") or {}
+            login = u.get("login")
+            if login:
+                usernames.add(login)
     except requests.exceptions.HTTPError as e:
         if token is None and getattr(e.response, "status_code", None) == 401:
             usernames = set()
@@ -242,7 +239,13 @@ def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, 
 
 def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str, skip_codeowners: bool, skip_collaborators: bool, return_data: bool = False, export_csv: bool = False):
     """
-    
+    Export maintainers for a repository to CSV and/or return as list.
+
+    Collects maintainers from two sources (both can be toggled off):
+      - CODEOWNERS file: parses @-mentions from .github/CODEOWNERS, docs/CODEOWNERS, or CODEOWNERS.
+      - Collaborators API: includes users with admin, maintain, or push permissions.
+
+    Deduplicates across both sources before returning.
     """
     rows = []
     if not skip_codeowners:
@@ -295,33 +298,13 @@ def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = N
     """
     Export the owners of all forks for a repository to CSV and/or return as list.
     """
-    import requests
-    API_BASE_URL = "https://api.github.com"
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/forks"
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "gh-census/0.1"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     usernames = []
-    params = {"per_page": 100}
-    while url:
-        resp = requests.get(url, headers=headers, params=params)
-        if resp.status_code != 200:
-            break
-        forks = resp.json()
-        for fork in forks:
-            owner_info = fork.get("owner", {})
-            login = owner_info.get("login", "")
-            if login:
-                usernames.append(login)
-        # Pagination
-        link = resp.headers.get("Link", "")
-        next_url = None
-        for part in link.split(","):
-            if 'rel="next"' in part:
-                next_url = part[part.find("<")+1:part.find(">")]
-                break
-        url = next_url
-        params = None
+    # Use the shared paginate() utility — handles auth, rate limits, and Link-header pagination
+    for fork in paginate(url, token):
+        login = (fork.get("owner") or {}).get("login", "")
+        if login:
+            usernames.append(login)
     if export_csv and outdir:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_fork_owners.csv"), ["login"], [[u] for u in usernames])
     if return_data:

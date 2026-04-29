@@ -910,8 +910,8 @@ class TestGetUserDetailsAsync(unittest.TestCase):
         # alice from disk, bob fetched fresh
         self.assertIn("alice", result)
         self.assertIn("bob", result)
-        # session.get should only have been called for bob
-        self.assertEqual(session_mock.get.call_count, 1)
+        # session.get is now called 4 times per user (base profile + orgs + events + repos)
+        self.assertEqual(session_mock.get.call_count, 4)
 
 
 class TestGetUsersAsync(unittest.TestCase):
@@ -1025,6 +1025,316 @@ class TestGetUsersAsync(unittest.TestCase):
                     # Should not raise
                     result = self._run(self.rp.get_users_async(roles="contributors"))
         self.assertIsInstance(result, dict)
+
+
+class TestUserDataView(unittest.TestCase):
+    """Tests for the UserDataView dot-notation access wrapper."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def _make_view(self):
+        from repo_people.repo_people import UserDataView
+        return UserDataView({
+            "alice": {"login": "alice", "email_public": "alice@example.com", "followers": 10},
+            "bob":   {"login": "bob",   "email_public": "",                  "followers": 5},
+        })
+
+    def test_is_dict_subclass(self):
+        """UserDataView is a dict and supports standard dict operations."""
+        from repo_people.repo_people import UserDataView
+        view = self._make_view()
+        self.assertIsInstance(view, dict)
+        self.assertIsInstance(view, UserDataView)
+        self.assertIn("alice", view)
+        self.assertEqual(len(view), 2)
+
+    def test_dot_access_returns_field_for_all_users(self):
+        """Dot notation returns {username: {field: value}} for every user."""
+        view = self._make_view()
+        result = view.email_public
+        self.assertEqual(result, {
+            "alice": {"email_public": "alice@example.com"},
+            "bob":   {"email_public": ""},
+        })
+
+    def test_dot_access_numeric_field(self):
+        """Numeric fields are returned correctly via dot notation."""
+        view = self._make_view()
+        result = view.followers
+        self.assertEqual(result, {
+            "alice": {"followers": 10},
+            "bob":   {"followers": 5},
+        })
+
+    def test_dot_access_missing_field_returns_none(self):
+        """If a user record lacks the field, its value is None."""
+        from repo_people.repo_people import UserDataView
+        view = UserDataView({"alice": {"login": "alice"}})
+        result = view.followers
+        self.assertEqual(result, {"alice": {"followers": None}})
+
+    def test_dot_access_roles_field(self):
+        """The 'roles' field is also accessible via dot notation."""
+        from repo_people.repo_people import UserDataView
+        view = UserDataView({"alice": {"login": "alice", "roles": ["contributors"]}})
+        result = view.roles
+        self.assertEqual(result, {"alice": {"roles": ["contributors"]}})
+
+    def test_invalid_field_raises_attribute_error(self):
+        """Accessing an unknown attribute raises AttributeError."""
+        view = self._make_view()
+        with self.assertRaises(AttributeError) as ctx:
+            _ = view.not_a_real_field
+        self.assertIn("not_a_real_field", str(ctx.exception))
+
+    def test_get_users_returns_user_data_view(self):
+        """get_users() returns a UserDataView instance."""
+        from repo_people.repo_people import UserDataView
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            with patch("repo_people.repo_people.export") as mock_export:
+                _stub_export(mock_export, ["alice"])
+                with patch("repo_people.repo_people.GitHubUserInfo") as mock_cls:
+                    mock_cls.return_value.to_dict.return_value = {"login": "alice"}
+                    result = self.rp.get_users()
+        self.assertIsInstance(result, UserDataView)
+
+    def test_user_data_view_exported_from_package(self):
+        """UserDataView is importable from the top-level repo_people package."""
+        from repo_people import UserDataView
+        self.assertTrue(issubclass(UserDataView, dict))
+
+    def test_cache_clear_resets_valid_fields(self):
+        """_clear_valid_fields_cache() resets the cached frozenset so it is recomputed."""
+        from repo_people.repo_people import UserDataView
+        # Warm the cache
+        _ = UserDataView._get_valid_fields()
+        self.assertIsNotNone(UserDataView._valid_fields)
+        # Clear it
+        UserDataView._clear_valid_fields_cache()
+        self.assertIsNone(UserDataView._valid_fields)
+        # Recompute — should not raise and should return the same fields
+        fields_after = UserDataView._get_valid_fields()
+        self.assertIsInstance(fields_after, frozenset)
+        self.assertIn("login", fields_after)
+        self.assertIn("roles", fields_after)
+
+
+class TestCollectAllUsernamesParallel(unittest.TestCase):
+    """Tests for parallelised collect_all_usernames."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def _stub(self, mock_export):
+        for attr in _ALL_EXPORT_ATTRS:
+            getattr(mock_export, attr).return_value = []
+
+    def test_returns_all_roles_when_no_filter(self):
+        """collect_all_usernames returns a key for every valid role."""
+        with patch("repo_people.repo_people.export") as mock_export:
+            self._stub(mock_export)
+            result = self.rp.collect_all_usernames()
+        self.assertEqual(set(result.keys()), RepoPeople.VALID_ROLES)
+
+    def test_respects_roles_filter(self):
+        """Only requested roles are returned."""
+        with patch("repo_people.repo_people.export") as mock_export:
+            self._stub(mock_export)
+            result = self.rp.collect_all_usernames(roles=["contributors", "stargazers"])
+        self.assertEqual(set(result.keys()), {"contributors", "stargazers"})
+
+    def test_output_order_matches_input(self):
+        """Order of returned keys matches the requested roles list."""
+        with patch("repo_people.repo_people.export") as mock_export:
+            self._stub(mock_export)
+            requested = ["stargazers", "contributors"]
+            result = self.rp.collect_all_usernames(roles=requested)
+        self.assertEqual(list(result.keys()), requested)
+
+    def test_invalid_role_raises_value_error(self):
+        """An unrecognised role raises ValueError before any fetching."""
+        with patch("repo_people.repo_people.export") as mock_export:
+            self._stub(mock_export)
+            with self.assertRaises(ValueError):
+                self.rp.collect_all_usernames(roles=["unknown_role"])
+
+    def test_result_values_are_lists(self):
+        """Each role value is a list (possibly empty)."""
+        with patch("repo_people.repo_people.export") as mock_export:
+            mock_export.export_contributors.return_value = ["alice", "bob"]
+            for attr in _ALL_EXPORT_ATTRS:
+                if attr != "export_contributors":
+                    getattr(mock_export, attr).return_value = []
+            result = self.rp.collect_all_usernames(roles=["contributors"])
+        self.assertEqual(result["contributors"], ["alice", "bob"])
+
+
+class TestPrintMarkdown(unittest.TestCase):
+    """Tests for RepoPeople.print_markdown."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def test_prints_header_and_row(self):
+        """print_markdown outputs a header row, separator, and one data row."""
+        user_data = {"alice": {"login": "alice", "name": "Alice", "location": "NYC",
+                               "company": "ACME", "followers": 10, "public_repos": 5,
+                               "html_url": "https://github.com/alice"}}
+        with patch("builtins.print") as mock_print:
+            self.rp.print_markdown(user_data)
+        calls = [str(c.args[0]) for c in mock_print.call_args_list]
+        self.assertTrue(any("| login |" in c for c in calls))
+        self.assertTrue(any("| --- |" in c for c in calls))
+        self.assertTrue(any("alice" in c for c in calls))
+
+    def test_empty_data_prints_nothing(self):
+        """print_markdown does nothing when user_data is empty."""
+        with patch("builtins.print") as mock_print:
+            self.rp.print_markdown({})
+        mock_print.assert_not_called()
+
+    def test_custom_fields_respected(self):
+        """Only requested fields appear in the output."""
+        user_data = {"alice": {"login": "alice", "followers": 42, "name": "Alice"}}
+        with patch("builtins.print") as mock_print:
+            self.rp.print_markdown(user_data, fields=["login", "followers"])
+        calls = " ".join(str(c.args[0]) for c in mock_print.call_args_list)
+        self.assertIn("login", calls)
+        self.assertIn("followers", calls)
+        self.assertNotIn("name", calls)
+
+    def test_pipe_chars_escaped(self):
+        """Pipe characters inside values are escaped as \\|."""
+        user_data = {"x": {"login": "a|b", "name": "", "location": "",
+                           "company": "", "followers": 0, "public_repos": 0,
+                           "html_url": ""}}
+        with patch("builtins.print") as mock_print:
+            self.rp.print_markdown(user_data)
+        calls = " ".join(str(c.args[0]) for c in mock_print.call_args_list)
+        self.assertIn(r"\|", calls)
+
+
+class TestSummariseRoleDistribution(unittest.TestCase):
+    """Tests for the role_distribution key added to summarise()."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def _make_user(self, login, roles=None):
+        return {
+            "login": login, "is_bot": False,
+            "location": "", "location_normalized": "",
+            "company": "", "company_normalized": "",
+            "account_age_days": 500,
+            "roles": roles or [],
+        }
+
+    def test_role_distribution_key_present(self):
+        """summarise() result always contains 'role_distribution'."""
+        user_data = {"alice": self._make_user("alice", ["contributors"])}
+        result = self.rp.summarise(user_data)
+        self.assertIn("role_distribution", result)
+
+    def test_role_distribution_counts_are_correct(self):
+        """Each role count reflects how many users carry that role."""
+        user_data = {
+            "alice": self._make_user("alice", ["contributors", "stargazers"]),
+            "bob":   self._make_user("bob",   ["stargazers"]),
+        }
+        result = self.rp.summarise(user_data)
+        dist = result["role_distribution"]
+        self.assertEqual(dist.get("contributors"), 1)
+        self.assertEqual(dist.get("stargazers"), 2)
+
+    def test_role_distribution_empty_when_no_roles(self):
+        """role_distribution is an empty dict when no users have roles."""
+        user_data = {"alice": self._make_user("alice", [])}
+        result = self.rp.summarise(user_data)
+        self.assertEqual(result["role_distribution"], {})
+
+
+class TestCompare(unittest.TestCase):
+    """Tests for RepoPeople.compare."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp_a = RepoPeople(owner="o", repo="a", token="tok")
+        self.rp_b = RepoPeople(owner="o", repo="b", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def test_only_in_self(self):
+        """Users exclusive to the first repo appear in 'only_in_self'."""
+        data_a = {"alice": {}, "shared": {}}
+        data_b = {"bob": {}, "shared": {}}
+        result = self.rp_a.compare(self.rp_b, data_a, data_b)
+        self.assertEqual(result["only_in_self"], ["alice"])
+
+    def test_only_in_other(self):
+        """Users exclusive to the second repo appear in 'only_in_other'."""
+        data_a = {"alice": {}, "shared": {}}
+        data_b = {"bob": {}, "shared": {}}
+        result = self.rp_a.compare(self.rp_b, data_a, data_b)
+        self.assertEqual(result["only_in_other"], ["bob"])
+
+    def test_in_both(self):
+        """Users in both repos appear in 'in_both'."""
+        data_a = {"alice": {}, "shared": {}}
+        data_b = {"bob": {}, "shared": {}}
+        result = self.rp_a.compare(self.rp_b, data_a, data_b)
+        self.assertEqual(result["in_both"], ["shared"])
+
+    def test_all_keys_present(self):
+        """Result always contains 'only_in_self', 'only_in_other', and 'in_both'."""
+        result = self.rp_a.compare(self.rp_b, {}, {})
+        self.assertIn("only_in_self", result)
+        self.assertIn("only_in_other", result)
+        self.assertIn("in_both", result)
+
+    def test_empty_overlap(self):
+        """No shared users when user sets are disjoint."""
+        data_a = {"alice": {}}
+        data_b = {"bob": {}}
+        result = self.rp_a.compare(self.rp_b, data_a, data_b)
+        self.assertEqual(result["in_both"], [])
+
+    def test_results_are_sorted(self):
+        """All three lists are returned in alphabetical order."""
+        data_a = {"zara": {}, "mike": {}, "shared": {}}
+        data_b = {"beth": {}, "anna": {}, "shared": {}}
+        result = self.rp_a.compare(self.rp_b, data_a, data_b)
+        self.assertEqual(result["only_in_self"], sorted(result["only_in_self"]))
+        self.assertEqual(result["only_in_other"], sorted(result["only_in_other"]))
+        self.assertEqual(result["in_both"], sorted(result["in_both"]))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 [![Documentation Status](https://readthedocs.org/projects/repo-people/badge/?version=latest)](https://repo-people.readthedocs.io/en/latest/?badge=latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](https://opensource.org/licenses/MIT)
 [![Issues](https://img.shields.io/github/issues/amckenna41/repo-people)](https://github.com/amckenna41/repo-people/issues)
-[![codecov](https://codecov.io/gh/amckenna41/repo-people/branch/master/graph/badge.svg?token=4PQDVGKGYN)](https://codecov.io/gh/amckenna41/repo-people)
+[![codecov](https://codecov.io/gh/amckenna41/repo-people/branch/main/graph/badge.svg?token=4PQDVGKGYN)](https://codecov.io/gh/amckenna41/repo-people)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/amckenna41/repo-people/refs/heads/main/images/logo.png" alt="repo-people logo" width="300"/>
@@ -24,7 +24,7 @@ Table of Contents
   * [Documentation](#documentation)
   * [Usage](#usage)
   * [Directories](#directories)
-  * [Issues](#issues)
+  * [Issues](#issues)c`
   * [License](#license)
   * [Contact](#contact)
 
@@ -46,6 +46,7 @@ Key capabilities:
 - Export to **JSON**, **CSV** and **Markdown** table
 - Analysis helpers: `summarise()` and `top_users()`
 - Token validated on startup — invalid or expired tokens raise `ConnectionError` immediately
+- `owner` and `repo` validated on construction — invalid characters raise `ValueError` immediately
 - Rate-limit progress printed every 50 users with remaining request count and reset time
 
 ---
@@ -76,6 +77,11 @@ Install the latest version of `repo-people` via [PyPi][PyPi] using pip:
 
 ```bash
 pip3 install repo-people --upgrade
+```
+
+To enable the **async** pipeline (`get_users_async`) install with the `async` extra:
+```bash
+pip3 install "repo-people[async]"
 ```
 
 Installation from source:
@@ -145,10 +151,10 @@ RepoPeople(owner, repo, token=None, outdir=None, skip_codeowners=False, skip_col
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `owner` | `str` | — | GitHub username or organisation that owns the repo. |
-| `repo` | `str` | — | Repository name. |
+| `owner` | `str` | — | GitHub username or organisation that owns the repo. Must contain only `[A-Za-z0-9_.-]` characters; raises `ValueError` on construction otherwise. |
+| `repo` | `str` | — | Repository name. Same character restrictions as `owner`. |
 | `token` | `str \| None` | `None` | Personal access token. Strongly recommended — validated immediately on init; raises `ConnectionError` for invalid tokens. |
-| `outdir` | `str \| None` | `"{owner}_{repo}"` | Leaf directory inside `outputs/`. All output files are written under `outputs/{outdir}/`. |
+| `outdir` | `str \| None` | `"outputs"` | Directory where all output files are written. |
 | `skip_codeowners` | `bool` | `False` | Skip CODEOWNERS file when collecting maintainers. |
 | `skip_collaborators` | `bool` | `False` | Skip repo collaborators when collecting maintainers. |
 
@@ -158,8 +164,8 @@ RepoPeople(owner, repo, token=None, outdir=None, skip_codeowners=False, skip_col
 |---|---|---|---|
 | `export` | `bool` | `False` | Write results to a JSON file. |
 | `export_csv` | `bool` | `False` | Write results to a CSV file. |
-| `save_each_iteration` | `bool` | `False` | Save after every single user fetch. |
-| `limit` | `int \| None` | `None` | Cap the number of profiles to fetch. |
+| `save_each_iteration` | `bool` | `False` | Save after every 10 user fetches (batched to reduce I/O). |
+| `limit` | `int \| None` | `None` | Cap the number of profiles to fetch.  Usernames are sorted alphabetically before the cap is applied, so results are deterministic. |
 | `roles` | `list[str] \| None` | `None` (all 9) | Restrict which roles to collect. |
 | `exclude` | `list[str] \| None` | `None` | Usernames to skip. |
 | `exclude_bots` | `bool` | `False` | Skip bot accounts automatically. |
@@ -167,7 +173,7 @@ RepoPeople(owner, repo, token=None, outdir=None, skip_codeowners=False, skip_col
 | `verbose` | `bool` | `True` | Print progress to stdout. |
 | `fields` | `list[str] \| str \| None` | `None` (all) | Restrict which fields appear in output. Invalid names raise `ValueError` before any fetch. |
 | `include_social_accounts` | `bool` | `False` | Fetch each user's linked social accounts (LinkedIn, Mastodon, npm, …). Costs one extra API call per user. |
-| `workers` | `int` | `1` | Number of concurrent fetch threads. Increase for faster collection on large repos. |
+| `workers` | `int` | `1` | Number of concurrent fetch threads (max 32). Increase for faster collection on large repos. |
 
 Valid `roles` values: `contributors`, `maintainers`, `stargazers`, `watchers`, `issue_authors`, `pr_authors`, `fork_owners`, `commit_authors`, `dependents`.
 
@@ -188,6 +194,15 @@ user_data = rp.get_users(
     exclude=["dependabot", "github-actions[bot]"],
     exclude_bots=True,
 )
+```
+
+#### Export to JSON Lines (JSONL)
+
+```python
+# Write one JSON object per line (streaming-friendly)
+rp.export_to_json(user_data, lines=True)
+# or with a custom filename
+rp.export_to_json(user_data, filename="users.jsonl", lines=True)
 ```
 
 #### Export to JSON and CSV
@@ -271,7 +286,7 @@ Each user entry contains 30+ fields. See [FIELDS.md](FIELDS.md) for the full ref
 | Timestamps | `created_at`, `updated_at` |
 | Counters | `followers`, `following`, `public_repos`, `public_gists` |
 | Flags | `has_public_email`, `has_blog`, `has_twitter`, `is_bot`, `hireable` |
-| Computed | `account_age_days`, `followers_following_ratio`, `repos_per_year`, `recently_active`, `last_public_event_at` |
+| Computed | `account_age_days`, `followers_following_ratio`, `repos_per_year`, `recently_active` (based on `last_public_event_at`, not `updated_at`), `last_public_event_at` |
 | Organisations | `public_orgs`, `orgs_public_count` |
 | Sampled | `top_languages`, `total_public_stars_sampled`, `total_public_forks_sampled`, `ssh_keys_count`, `gpg_keys_count`, `starred_repos_sampled` |
 | Social | `social_accounts` (opt-in via `include_social_accounts`) |
@@ -318,7 +333,6 @@ Any issues, errors or bugs can be raised via the [Issues](https://github.com/amc
 
 ## Contact
 If you have any questions or comments, please contact amckenna41@qub.ac.uk or raise an issue on the [Issues][Issues] tab. <br><br>
-<!-- [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/adam-mckenna-7a5b22151/) -->
 
 ## License
 Distributed under the MIT License. See [`LICENSE`][license] for more details. 

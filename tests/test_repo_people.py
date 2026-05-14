@@ -101,6 +101,23 @@ class TestRepoPeopleInit(unittest.TestCase):
             self.assertIn("bad token", str(ctx.exception))
         self.gh_patcher.start()  # restart for tearDown
 
+    def test_invalid_owner_raises_value_error(self):
+        """owner with invalid characters raises ValueError before any GitHub call."""
+        with self.assertRaises(ValueError):
+            RepoPeople(owner="../etc", repo="repo")
+
+    def test_invalid_repo_raises_value_error(self):
+        """repo with invalid characters raises ValueError before any GitHub call."""
+        with self.assertRaises(ValueError):
+            RepoPeople(owner="owner", repo="repo<script>")
+
+    def test_token_stored_privately(self):
+        """Token is stored as _token (private) and accessible via .token property."""
+        rp = self._make(token="ghp_test_token")
+        self.assertEqual(rp.token, "ghp_test_token")
+        # Should NOT appear directly in vars() or repr()
+        self.assertNotIn("ghp_test_token", repr(rp))
+
 
 class TestCollectAllUsernames(unittest.TestCase):
     """Tests for RepoPeople.collect_all_usernames."""
@@ -248,6 +265,17 @@ class TestGetUserDetails(unittest.TestCase):
         fetching_calls = [c for c in mock_print.call_args_list if "Fetching:" in str(c)]
         self.assertEqual(fetching_calls, [])
 
+    def test_preflight_rate_limit_status_is_printed(self):
+        self.rp.gh.rate_limiting = (123, 5000)
+        self.rp.gh.rate_limiting_resettime = 0
+        with patch("repo_people.repo_people.GitHubUserInfo") as mock_cls:
+            mock_cls.return_value.to_dict.return_value = {"login": "alice"}
+            with patch("builtins.print") as mock_print:
+                self.rp.get_user_details(["alice"], verbose=False)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("Rate limit:", printed)
+        self.assertIn("123/5000", printed)
+
     def test_save_each_iteration_writes_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.rp.outdir = tmpdir
@@ -293,6 +321,16 @@ class TestGetUserDetails(unittest.TestCase):
             result = self.rp.get_user_details(["alice"], workers=2)
         self.assertIn("alice", result)
 
+    def test_workers_cap_emits_warning(self):
+        """workers > 32 emits a UserWarning and caps at 32."""
+        import warnings
+        with patch("repo_people.repo_people.GitHubUserInfo") as mock_cls:
+            mock_cls.return_value.to_dict.return_value = {"login": "alice"}
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                self.rp.get_user_details(["alice"], workers=100)
+        self.assertTrue(any("32" in str(warning.message) for warning in w))
+
     def test_failed_fetch_prints_summary(self):
         """A 'Skipped N user(s)' summary is printed when users cannot be fetched."""
         def side_effect(gh, username):
@@ -335,6 +373,28 @@ class TestExportToJson(unittest.TestCase):
             self.rp.outdir = tmpdir
             path = self.rp.export_to_json({"u": {"login": "u"}}, filename="out.json")
             self.assertTrue(path.endswith("out.json"))
+
+    def test_jsonl_mode_writes_one_record_per_line(self):
+        """lines=True writes valid JSON Lines format."""
+        import json as json_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            user_data = {"alice": {"login": "alice"}, "bob": {"login": "bob"}}
+            path = self.rp.export_to_json(user_data, lines=True)
+            self.assertTrue(path.endswith(".jsonl"))
+            with open(path) as f:
+                lines = [l.strip() for l in f if l.strip()]
+            self.assertEqual(len(lines), 2)
+            # Each line must be valid JSON
+            for line in lines:
+                json_mod.loads(line)
+
+    def test_jsonl_mode_custom_filename(self):
+        """Explicit filename overrides the .jsonl default suffix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            path = self.rp.export_to_json({"u": {"login": "u"}}, filename="out.jsonl", lines=True)
+            self.assertTrue(path.endswith("out.jsonl"))
 
 
 class TestExportToCsv(unittest.TestCase):

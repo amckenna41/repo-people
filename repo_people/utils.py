@@ -1,9 +1,49 @@
 import csv
 import os
 import time
+import re
 from typing import Dict, Iterable, List, Optional
 
 import requests
+
+
+def validate_owner_repo(owner: str, repo: str) -> None:
+    """
+    Raise ValueError if *owner* or *repo* contain characters that are not
+    valid in a GitHub user/organisation name or repository name.
+
+    GitHub enforces: alphanumeric, hyphens, underscores, and dots.
+    Rejecting anything else prevents URL/path injection.
+    """
+    _SAFE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+    if not owner or not _SAFE.match(owner):
+        raise ValueError(
+            f"Invalid owner {owner!r}: must contain only alphanumeric characters, "
+            "hyphens, underscores, or dots."
+        )
+    if not repo or not _SAFE.match(repo):
+        raise ValueError(
+            f"Invalid repo {repo!r}: must contain only alphanumeric characters, "
+            "hyphens, underscores, or dots."
+        )
+
+
+def _is_bot(login: str, user_type: str = "") -> bool:
+    """
+    Return True if the account is a bot.
+
+    Matches the same criteria used by the sync path in ``users.py`` so
+    callers can share a single source of truth:
+
+    - ``user_type`` (case-insensitive) is ``"bot"``
+    - login ends with ``[bot]``
+    - login ends with ``-bot``
+    """
+    if (user_type or "").lower() == "bot":
+        return True
+    if login.endswith("[bot]") or login.endswith("-bot"):
+        return True
+    return False
 
 
 def _headers(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -29,7 +69,9 @@ def _sleep_if_ratelimited(resp: requests.Response):
         retry_after = resp.headers.get("Retry-After")
         wait_s = int(retry_after) if (retry_after and retry_after.isdigit()) else 0
     if wait_s == 0:
-        return False
+        # No Retry-After or X-RateLimit-Reset header — use a short fixed back-off
+        # rather than silently giving up, so the caller can retry the request.
+        wait_s = 10
     if wait_s > MAX_SLEEP:
         print(f"Rate limit wait ({wait_s}s) exceeds maximum allowed ({MAX_SLEEP}s). Skipping request.", flush=True)
         return "skip"

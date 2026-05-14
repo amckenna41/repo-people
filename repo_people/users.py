@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any, Tuple, Union, TYPE_CHECKING
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 
+import requests
 from github import Github, Auth
 from github.NamedUser import NamedUser
 from github.GithubObject import IncompletableObject
@@ -374,20 +375,37 @@ class GitHubUserInfo:
         return stars, forks
 
     def social_accounts(self) -> Dict[str, str]:
-        """Fetch social accounts via the GitHub REST API; returns provider -> url dict."""
+        """Fetch social accounts via the GitHub REST API; returns provider -> url dict.
+
+        Uses ``requests.get`` directly rather than the private PyGithub requester
+        so the call is stable across PyGithub versions.
+        """
         if "social_accounts" in self._cache:
             return self._cache["social_accounts"]
         result: Dict[str, str] = {}
         try:
-            # Use PyGithub's built-in requester so auth + rate-limiting are handled
-            _, data = self._gh._Github__requester.requestJsonAndCheck(
-                "GET", f"/users/{self.login}/social_accounts"
-            )
-            for entry in data or []:
-                provider = (entry.get("provider") or "").lower()
-                url = entry.get("url") or ""
-                if provider and url:
-                    result[provider] = url
+            token = None
+            try:
+                # Extract the token from the underlying PyGithub requester if available
+                requester = getattr(self._gh, "_Github__requester", None)
+                token = getattr(requester, "_Requester__authorizationHeader", None)
+                if token and token.startswith("Bearer "):
+                    token = token[len("Bearer "):]
+                elif token and token.startswith("token "):
+                    token = token[len("token "):]
+            except Exception:
+                pass
+            headers = {"Accept": "application/vnd.github+json", "User-Agent": "repo-people/1.0"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            url = f"https://api.github.com/users/{self.login}/social_accounts"
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                for entry in resp.json() or []:
+                    provider = (entry.get("provider") or "").lower()
+                    acct_url = entry.get("url") or ""
+                    if provider and acct_url:
+                        result[provider] = acct_url
         except Exception:
             pass
         self._cache["social_accounts"] = result
@@ -432,8 +450,8 @@ class GitHubUserInfo:
     def snapshot(
         self,
         *,
-        include_langs: bool = True,
-        include_star_fork_sums: bool = True,
+        include_langs: bool = False,
+        include_star_fork_sums: bool = False,
         langs_max_repos: int = 50,
         sums_max_repos: int = 50,
         include_keys_counts: bool = False,
@@ -442,7 +460,17 @@ class GitHubUserInfo:
         recent_days: int = 90,
         repo=None
     ) -> UserSnapshot:
-        """Collects all lightweight fields + optional aggregates into a dataclass."""
+        """Collects all lightweight fields + optional aggregates into a dataclass.
+
+        Parameters
+        ----------
+        include_langs:
+            Collect top-3 languages from the user's repositories.  **Expensive** — makes
+            one API call per repository up to *langs_max_repos*.  Off by default.
+        include_star_fork_sums:
+            Sum stars and forks across the user's repositories.  **Expensive** — same
+            cost as *include_langs*.  Off by default.
+        """
         # Lightweight fields
         snap = UserSnapshot(
             login=self.login,

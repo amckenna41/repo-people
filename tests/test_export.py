@@ -46,15 +46,16 @@ class ExportUnitTests(unittest.TestCase):
         self.assertEqual(sorted(result), ["alice", "bob"])
 
     def test_export_contributors_count_when_no_return_data(self):
-        """export_contributors returns an integer count when return_data=False."""
+        """export_contributors always returns a list of logins (return_data is deprecated)."""
         payload = [{"author": {"login": "alice"}}, {"author": {"login": "bob"}}]
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("repo_people.export.requests.get", return_value=_mock_response(payload)):
                 result = export.export_contributors(
                     owner="o", repo="r", token=None, outdir=tmpdir, return_data=False
                 )
-        self.assertIsInstance(result, int)
-        self.assertEqual(result, 2)
+        # return_data is now ignored — always returns a list
+        self.assertIsInstance(result, list)
+        self.assertEqual(sorted(result), ["alice", "bob"])
 
     def test_export_contributors_csv_created(self):
         """export_contributors with export_csv=True creates a contributors.csv file."""
@@ -242,6 +243,31 @@ class ExportUnitTests(unittest.TestCase):
         # "oz" has admin+push — included; "pat" has only pull — excluded
         self.assertIn("oz", result)
         self.assertNotIn("pat", result)
+
+    def test_export_maintainers_deduplicates_same_login(self):
+        """A user appearing in both CODEOWNERS and collaborators should be listed once."""
+        codeowners_text = "* @oz"
+        collab_payload = [
+            {"login": "oz", "html_url": "https://github.com/oz",
+             "permissions": {"admin": True, "maintain": False, "push": True, "triage": False, "pull": True}},
+        ]
+
+        def side_effect(url, **kwargs):
+            if "contents" in url:
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.json.return_value = {"content": __import__("base64").b64encode(codeowners_text.encode()).decode()}
+                resp.headers = {}
+                return resp
+            return _mock_response(collab_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", side_effect=side_effect):
+                result = export.export_maintainers(
+                    owner="o", repo="r", token="tok", outdir=tmpdir,
+                    skip_codeowners=False, skip_collaborators=False, return_data=True,
+                )
+        self.assertEqual(result.count("oz"), 1, "oz appeared more than once (dedup failed)")
 
     def test_paginate_stops_without_next_link(self):
         """A response with no Link header causes pagination to stop after one page."""
@@ -544,6 +570,183 @@ class Export_Tests(unittest.TestCase):
         print(f"\n✅ Integration test completed successfully!")
         print(f"   Exported {len(total_unique_users)} unique users across 9 categories")
         print(f"   All CSV files created in: {self.repo_output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# export_dependents unit tests (scraping — no real HTTP)
+# ---------------------------------------------------------------------------
+
+class TestExportDependents(unittest.TestCase):
+    """Unit tests for export_dependents — uses a mock requests.Session."""
+
+    def _make_html(self, user_repo_pairs, next_url=None):
+        """Build minimal HTML mimicking the GitHub dependents page."""
+        rows_html = ""
+        for owner, repo_name in user_repo_pairs:
+            rows_html += (
+                f'<div class="Box-row">'
+                f'<a href="/{owner}/{repo_name}" data-hovercard-type="repository">{owner}/{repo_name}</a>'
+                f"</div>"
+            )
+        next_link = ""
+        if next_url:
+            next_link = f'<div class="paginate-container"><a class="next_page" href="{next_url}">Next</a></div>'
+        return f"<html><body>{rows_html}{next_link}</body></html>"
+
+    def _mock_session(self, responses):
+        """
+        Returns a mock requests.Session whose .get() returns responses in order.
+        *responses* is a list of (status_code, html_text) tuples.
+        """
+        session = MagicMock()
+        response_mocks = []
+        for status, text in responses:
+            r = MagicMock()
+            r.status_code = status
+            r.text = text
+            response_mocks.append(r)
+        session.get.side_effect = response_mocks
+        return session
+
+    def test_returns_list_of_usernames(self):
+        """export_dependents returns a sorted list of usernames (repo owners)."""
+        html = self._make_html([("alice", "proj"), ("bob", "tool")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                result = export.export_dependents("o", "r", outdir=tmpdir)
+        self.assertIsInstance(result, list)
+        self.assertIn("alice", result)
+        self.assertIn("bob", result)
+
+    def test_always_returns_list_regardless_of_return_data(self):
+        """return_data=False still returns a list (parameter is deprecated)."""
+        html = self._make_html([("alice", "proj")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                result = export.export_dependents("o", "r", outdir=tmpdir, return_data=False)
+        self.assertIsInstance(result, list)
+
+    def test_limit_zero_returns_empty(self):
+        """limit=0 should return an empty list immediately."""
+        # Even if there are dependents on the page, limit=0 must return []
+        html = self._make_html([("alice", "proj")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                result = export.export_dependents("o", "r", outdir=tmpdir, limit=0)
+        self.assertEqual(result, [])
+
+    def test_limit_caps_results(self):
+        """limit=N stops collecting after N unique repos are found."""
+        # Use two repos from the same owner so that limit=1 repo → 1 unique username
+        html = self._make_html([("alice", "proj-a"), ("alice", "proj-b")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                result = export.export_dependents("o", "r", outdir=tmpdir, limit=1)
+        # At most 1 unique repo was collected → 1 unique owner
+        self.assertLessEqual(len(result), 1)
+
+    def test_non_200_triggers_backoff_and_stops(self):
+        """A non-200 response aborts pagination and still returns the collected results."""
+        html = self._make_html([("alice", "proj")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html), (429, "")])
+                with patch("repo_people.export.time.sleep"):  # don't actually sleep
+                    result = export.export_dependents("o", "r", outdir=tmpdir)
+        # First page was collected before the 429
+        self.assertIn("alice", result)
+
+    def test_csv_created(self):
+        """export_csv=True creates a _dependents.csv file."""
+        html = self._make_html([("alice", "proj")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                export.export_dependents("o", "r", outdir=tmpdir, export_csv=True)
+            self.assertTrue(os.path.isfile(os.path.join(tmpdir, "o_r_dependents.csv")))
+
+    def test_deduplicates_repos_same_owner(self):
+        """Multiple repos from the same owner are deduped to a single username."""
+        html = self._make_html([("alice", "repo-a"), ("alice", "repo-b")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.Session") as mock_session_cls:
+                mock_session_cls.return_value = self._mock_session([(200, html)])
+                result = export.export_dependents("o", "r", outdir=tmpdir)
+        self.assertEqual(result.count("alice"), 1)
+
+
+# ---------------------------------------------------------------------------
+# utils helpers unit tests
+# ---------------------------------------------------------------------------
+
+class TestUtilsHelpers(unittest.TestCase):
+    """Unit tests for utility helpers added in utils.py."""
+
+    def test_is_bot_by_type(self):
+        from repo_people.utils import _is_bot
+        self.assertTrue(_is_bot("renovate", "Bot"))
+        self.assertTrue(_is_bot("renovate", "bot"))
+
+    def test_is_bot_by_bot_suffix(self):
+        from repo_people.utils import _is_bot
+        self.assertTrue(_is_bot("github-actions[bot]", "User"))
+        self.assertTrue(_is_bot("dependabot-bot", "User"))
+
+    def test_not_bot_for_regular_user(self):
+        from repo_people.utils import _is_bot
+        self.assertFalse(_is_bot("alice", "User"))
+        self.assertFalse(_is_bot("robotics-lab", "Organization"))
+
+    def test_validate_owner_repo_accepts_valid(self):
+        from repo_people.utils import validate_owner_repo
+        # Should not raise
+        validate_owner_repo("amckenna41", "repo-people")
+        validate_owner_repo("org_name", "repo.name")
+
+    def test_validate_owner_repo_rejects_empty(self):
+        from repo_people.utils import validate_owner_repo
+        with self.assertRaises(ValueError):
+            validate_owner_repo("", "repo")
+        with self.assertRaises(ValueError):
+            validate_owner_repo("owner", "")
+
+    def test_validate_owner_repo_rejects_path_traversal(self):
+        from repo_people.utils import validate_owner_repo
+        with self.assertRaises(ValueError):
+            validate_owner_repo("../etc", "passwd")
+        with self.assertRaises(ValueError):
+            validate_owner_repo("owner", "../repo")
+
+    def test_validate_owner_repo_rejects_special_chars(self):
+        from repo_people.utils import validate_owner_repo
+        with self.assertRaises(ValueError):
+            validate_owner_repo("owner;rm", "repo")
+        with self.assertRaises(ValueError):
+            validate_owner_repo("owner", "repo<script>")
+
+    def test_sleep_if_ratelimited_zero_wait_uses_fallback(self):
+        """wait_s=0 (no Retry-After header) should sleep 10s, not silently skip."""
+        from repo_people.utils import _sleep_if_ratelimited
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {}  # no Retry-After, no X-RateLimit-Reset
+        with patch("repo_people.utils.time.sleep") as mock_sleep:
+            _sleep_if_ratelimited(mock_resp)
+        mock_sleep.assert_called_once_with(10)
+
+    def test_sleep_if_ratelimited_uses_header_value(self):
+        """Retry-After header value is used as the sleep duration."""
+        from repo_people.utils import _sleep_if_ratelimited
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"Retry-After": "30"}
+        with patch("repo_people.utils.time.sleep") as mock_sleep:
+            _sleep_if_ratelimited(mock_resp)
+        mock_sleep.assert_called_once_with(30)
 
 
 if __name__ == '__main__':

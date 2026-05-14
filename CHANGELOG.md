@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] - 2026-05-14
+
+### Added
+
+- **`utils.validate_owner_repo()`** — validates `owner` and `repo` at construction time, rejecting characters outside `[A-Za-z0-9_.-]`. Prevents path/URL injection.
+- **`utils._is_bot()`** — shared helper used by both sync and async pipelines for consistent bot detection (type == "Bot", `[bot]` suffix, `-bot` suffix).
+- **`export_to_json(lines=True)`** — JSONL / JSON Lines streaming export option. Writes one JSON object per line into a `.jsonl` file.
+- **`workers` cap** — `get_user_details()` now caps `workers` at 32 with a `UserWarning` if exceeded.
+- **`pyproject.toml` optional extras** — `aiohttp` moved to `[async]` extra; `tqdm` added as `[progress]` extra. Install with `pip install repo-people[async]`.
+- **`__version__`** exposed in `repo_people/__init__.py`.
+- **`TestExportDependents`** — 8 new unit tests for `export_dependents` (previously had zero coverage).
+- **`TestUtilsHelpers`** — 7 new unit tests for `validate_owner_repo` and `_is_bot`.
+- Additional `TestRepoPeopleInit` tests: input validation, token privacy, workers cap warning.
+- Additional `TestExportToJson` tests: JSONL mode.
+
+### Changed
+
+- **`export_*` functions** — all export functions now always return a `list` of logins. The `return_data` parameter is kept for backwards compatibility but is ignored (was previously a dual return type anti-pattern: `int` vs `list`).
+- **`export_maintainers` deduplication** — dedup key changed from `(login_or_team, source)` to just `login_or_team`, so the same person appearing in both CODEOWNERS and collaborators is correctly counted once.
+- **`export_dependents` limit semantics** — `limit=0` now correctly returns an empty list immediately. Previously `0` was falsy and the check was skipped entirely.
+- **`export_dependents` backoff** — non-200 responses now trigger exponential back-off (doubles per failed page, capped at 60 s) instead of a fixed 1 s sleep per page.
+- **`_sleep_if_ratelimited`** — a `wait_s == 0` (no `Retry-After` header) now uses a 10 s fixed back-off instead of silently returning `False` and causing the caller to skip the retry.
+- **Async `is_bot`** — unified with sync path via `_is_bot()` helper; previously only checked `type == "Bot"`.
+- **Async `company_normalized` / `location_normalized`** — now match sync path: strip `@` prefix, lowercase. Previously applied `.title()` causing divergent output.
+- **Async `failed.append`** — now wrapped in `asyncio.Lock` to prevent data race.
+- **`save_each_iteration`** — writes in batches of 10 users instead of after every single fetch (O(n²) I/O improvement). A final flush is performed at the end of the function.
+- **Rate-limit progress** — reads from `gh.rate_limiting` / `gh.rate_limiting_resettime` (in-memory cache populated by the last API response) instead of calling `get_rate_limit()` every 50 users.
+- **`snapshot()` defaults** — `include_langs` and `include_star_fork_sums` default to `False` instead of `True`. These options iterate over repositories (expensive). Pass `include_langs=True` to opt in.
+- **Token stored as `_token`** — stored privately; exposed via `.token` read-only property to reduce accidental logging/repr exposure.
+- **`social_accounts()`** — now uses `requests.get` directly instead of the private `_Github__requester` internal PyGithub API, making it stable across PyGithub versions.
+- **`FIELDS.md`** — `recently_active` description corrected: uses `last_public_event_at`, not `updated_at`.
+- **`README.md`** — Codecov badge `branch/master` → `branch/main`; `outdir` default corrected to `"outputs"`; `limit` documents alphabetical ordering; `recently_active` clarified; optional install instructions added.
+- **CI (`build_test.yml`)** — `paths-ignore` globs fixed (`**/.md` → `**/*.md`); test runner switched from `unittest discover` to `pytest`.
+- **`pyproject.toml`** — removed non-standard `"License :: Free For Educational Use"` classifier; version bumped to `1.0.0`.
+- **`requirements.txt`** — removed dev/build deps (`pytest`, `setuptools`, `wheel`, `python-dotenv`).
+
+### Fixed
+
+- `export_dependents`: `limit=0` now correctly returns `[]` (was a falsy-check bug).
+- Async pipeline data race on `failed` list (missing `asyncio.Lock`).
+- `social_accounts()` was calling `_Github__requester.requestJsonAndCheck` (name-mangled private API).
+- CI `paths-ignore` globs would never match any file (missing `*` before `.md`/`.yml`).
+
+---
+
 ## [0.5.0] - 2026-04-28
 
 ### Added

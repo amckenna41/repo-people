@@ -39,7 +39,7 @@ All GitHub profile fields available for export:
 | `account_age_days` | Number of days since the account was created (computed from `created_at`). |
 | `followers_following_ratio` | `followers / following`, or `followers` when `following` is zero. Rounded to 2 decimal places. |
 | `repos_per_year` | `public_repos / account_age_years`. Rounded to 2 decimal places. |
-| `recently_active` | `True` if `updated_at` is within the last 90 days. |
+| `recently_active` | `True` if `last_public_event_at` is within the last 90 days. |
 | `top_languages` | List of `(language, byte_count)` tuples sampled from the user's public repos, ordered by frequency. `None` if not computed. |
 | `total_public_stars_sampled` | Total stars received across a sample of the user's public repos. `None` if not computed. |
 | `total_public_forks_sampled` | Total forks received across a sample of the user's public repos. `None` if not computed. |

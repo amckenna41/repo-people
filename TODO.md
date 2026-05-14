@@ -1,1 +1,2 @@
-- [ ] Fix pypi account
+- [X] Fix pypi account
+- [ ] After callin get_users, ensure a meaningful report/summary is printed out.

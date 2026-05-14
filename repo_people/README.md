@@ -47,8 +47,8 @@ RepoPeople(owner, repo, token=None, outdir=None, skip_codeowners=False, skip_col
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `owner` | `str` | — | GitHub username or organisation that owns the repo. |
-| `repo` | `str` | — | Repository name. |
+| `owner` | `str` | — | GitHub username or organisation that owns the repo. Must contain only `[A-Za-z0-9_.-]` characters; raises `ValueError` on construction otherwise. |
+| `repo` | `str` | — | Repository name. Same character restrictions as `owner`. |
 | `token` | `str \| None` | `None` | Personal access token. Strongly recommended — validated immediately on init; raises `ConnectionError` for invalid tokens. |
 | `outdir` | `str \| None` | `"{owner}_{repo}"` | Leaf directory inside `outputs/`. All output files are written under `outputs/{outdir}/`. |
 | `skip_codeowners` | `bool` | `False` | Skip CODEOWNERS file when collecting maintainers. |

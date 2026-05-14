@@ -16,6 +16,7 @@ logging.getLogger("github.Requester").setLevel(logging.ERROR)
 from github import Github, Auth
 from typing import Optional, List, Dict, Set
 from .users import GitHubUserInfo
+from .utils import validate_owner_repo, _is_bot
 from . import export
 
 __all__ = ["RepoPeople", "UserDataView"]
@@ -92,9 +93,12 @@ class RepoPeople:
         skip_codeowners: bool = False,
         skip_collaborators: bool = False,
     ):
+        validate_owner_repo(owner, repo)
         self.owner = owner
         self.repo = repo
-        self.token = token
+        # Store token as a private attribute to reduce accidental exposure
+        # (e.g. in repr(), vars(), or debug logs).
+        self._token = token
         # All files are stored flat in outputs/ with an owner_repo_ filename prefix
         self.outdir = outdir or "outputs"
         self.file_prefix = f"{owner}_{repo}_"
@@ -109,11 +113,31 @@ class RepoPeople:
             raise ConnectionError(f"GitHub connection failed — verify your token. ({e})") from e
         self.repo_obj = self.gh.get_repo(f"{owner}/{repo}")
 
+    @property
+    def token(self) -> Optional[str]:
+        """GitHub personal access token (private; store via constructor only)."""
+        return self._token
+
     def __repr__(self) -> str:
         return (
             f"RepoPeople(owner={self.owner!r}, repo={self.repo!r}, "
             f"outdir={self.outdir!r}, valid_roles={len(self.VALID_ROLES)})"
         )
+
+    def _print_rate_limit_status(self, context: str = "") -> None:
+        """Print the current GitHub rate-limit window when available."""
+        try:
+            remaining, total_limit = self.gh.rate_limiting
+            reset_epoch = self.gh.rate_limiting_resettime
+            reset_in = max(0, int((reset_epoch - time.time()) / 60))
+            auth_state = "authenticated" if self._token else "unauthenticated"
+            prefix = f"{context} " if context else ""
+            print(
+                f"{prefix}Rate limit: {remaining}/{total_limit} remaining, "
+                f"resets in {reset_in}m ({auth_state})"
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Step 1 - collect usernames from every repo role
@@ -216,15 +240,18 @@ class RepoPeople:
         Users that cannot be fetched are skipped with a warning.
 
         If save_each_iteration is True, user_details.json is updated after every
-        successful fetch so progress is preserved if the process is interrupted.
-        If limit is set, only the first N usernames are fetched.
+        10 successful fetches so progress is preserved if the process is interrupted
+        (batched to reduce I/O overhead).
+        If limit is set, only the first N usernames are fetched.  Note: usernames are
+        sorted alphabetically before any limit is applied, so results are deterministic.
         If exclude is provided, those logins are skipped.
-        If exclude_bots is True, logins ending in '[bot]' are skipped.
+        If exclude_bots is True, logins ending in '[bot]' or '-bot' are skipped.
         If resume is True, any logins already present in user_details.json are skipped.
         If verbose is False, per-user fetch messages are suppressed.
         If include_social_accounts is True, an extra REST call fetches each user's
         linked social accounts (LinkedIn, Mastodon, YouTube, npm, etc.).
         workers controls the number of concurrent fetches (default 1 = sequential).
+        Maximum supported value is 32; higher values are capped with a warning.
         """
         save_path = os.path.join(self.outdir, f"{self.file_prefix}user_details.json")
 
@@ -252,6 +279,16 @@ class RepoPeople:
         if save_each_iteration or resume:
             os.makedirs(self.outdir, exist_ok=True)
 
+        # Cap workers to a safe upper bound to prevent connection pool exhaustion
+        _MAX_WORKERS = 32
+        if workers > _MAX_WORKERS:
+            warnings.warn(
+                f"workers={workers} exceeds the maximum of {_MAX_WORKERS}; capping at {_MAX_WORKERS}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            workers = _MAX_WORKERS
+
         total = len(filtered)
         completed = 0
         failed: List[str] = []
@@ -276,8 +313,8 @@ class RepoPeople:
                     elif data.get("login"):
                         with lock:
                             user_data[data["login"]] = data
-                            # Incrementally persist progress after each successful fetch
-                            if save_each_iteration:
+                            # Persist progress in batches of 10 to reduce I/O overhead
+                            if save_each_iteration and len(user_data) % 10 == 0:
                                 with open(save_path, "w", encoding="utf-8") as f:
                                     json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
                 except Exception as e:
@@ -287,13 +324,16 @@ class RepoPeople:
 
                 completed += 1
                 # Print rate-limit status every 50 users and at the end
+                # Read from PyGithub's in-memory cache (populated by the last API
+                # response) so we don't burn an extra API call per progress update.
                 if completed % 50 == 0 or completed == total:
                     try:
-                        rl = self.gh.get_rate_limit()
-                        reset_in = max(0, int((rl.core.reset.timestamp() - time.time()) / 60))
+                        remaining, total_limit = self.gh.rate_limiting
+                        reset_epoch = self.gh.rate_limiting_resettime
+                        reset_in = max(0, int((reset_epoch - time.time()) / 60))
                         print(
                             f"  [Progress: {completed}/{total} | "
-                            f"Rate limit: {rl.core.remaining}/{rl.core.limit} remaining, "
+                            f"Rate limit: {remaining}/{total_limit} remaining, "
                             f"resets in {reset_in}m]"
                         )
                     except Exception:
@@ -302,6 +342,11 @@ class RepoPeople:
         # Print summary of any users that could not be fetched
         if failed:
             print(f"  Skipped {len(failed)} user(s): {failed}")
+
+        # Final flush — write whatever was collected that didn't hit a batch boundary
+        if save_each_iteration and user_data:
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
 
         return user_data
 
@@ -313,13 +358,30 @@ class RepoPeople:
         self,
         user_data: Dict[str, dict],
         filename: Optional[str] = None,
+        lines: bool = False,
     ) -> str:
-        """Write user data dict to a JSON file in outdir. Returns the output path."""
-        filename = filename or f"{self.file_prefix}user_details.json"
+        """Write user data dict to a JSON file in outdir. Returns the output path.
+
+        Parameters
+        ----------
+        lines:
+            When ``True``, writes one JSON object per line (JSON Lines / JSONL format)
+            instead of a single pretty-printed JSON object.  Useful for streaming
+            large datasets to downstream tools.  The output filename will end in
+            ``.jsonl`` instead of ``.json`` unless *filename* is explicitly set.
+        """
+        if lines and filename is None:
+            filename = f"{self.file_prefix}user_details.jsonl"
+        else:
+            filename = filename or f"{self.file_prefix}user_details.json"
         os.makedirs(self.outdir, exist_ok=True)
         path = os.path.join(self.outdir, filename)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
+            if lines:
+                for record in user_data.values():
+                    f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            else:
+                json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
         return path
 
     def export_to_csv(
@@ -555,7 +617,7 @@ class RepoPeople:
         fields: Optional[List[str]] = None,
         include_social_accounts: bool = False,
         workers: int = 1,
-    ) -> Dict[str, dict]:
+    ) -> UserDataView:
         """
         Full pipeline: collect all repo usernames -> fetch user details -> export.
 
@@ -632,6 +694,7 @@ class RepoPeople:
 
         # Step 2: fetch full GitHub profile for each unique user
         print("Fetching user details from GitHub API...")
+        self._print_rate_limit_status("Preflight")
         user_data = self.get_user_details(
             sorted(all_logins),
             save_each_iteration=save_each_iteration,
@@ -765,11 +828,12 @@ class RepoPeople:
                         raise ValueError("HTTP error fetching base profile")
                 except Exception as e:
                     print(f"  [WARNING] Could not fetch data for {login}: {e}")
-                    failed.append(login)
+                    async with lock:
+                        failed.append(login)
                     return
 
-                # Skip bot accounts flagged by profile type
-                if exclude_bots and raw.get("type") == "Bot":
+                # Skip bot accounts flagged by profile type or login pattern
+                if exclude_bots and _is_bot(login, raw.get("type", "")):
                     return
 
                 # --- Derived string fields (no extra calls needed) ---
@@ -778,7 +842,9 @@ class RepoPeople:
                 blog = raw.get("blog") or ""
                 blog_host = (urlparse(blog).hostname or "").lower() if blog else ""
                 company = raw.get("company") or ""
-                company_normalized = company.strip().lstrip("@")
+                company_normalized = company.strip()
+                if company_normalized.startswith("@"):
+                    company_normalized = company_normalized[1:]
                 location = raw.get("location") or ""
                 location_normalized = location.strip().lower()
 
@@ -860,7 +926,8 @@ class RepoPeople:
                     "public_gists": raw.get("public_gists", 0),
                     "public_orgs": public_orgs,
                     "orgs_public_count": len(public_orgs),
-                    "is_bot": raw.get("type") == "Bot",
+                    # is_bot: matches sync path in users.py (type, [bot] suffix, -bot suffix)
+                    "is_bot": _is_bot(raw.get("login", login), raw.get("type", "")),
                     "last_public_event_at": last_public_event_at,
                     "has_public_email": bool(email),
                     "has_blog": bool(blog),
@@ -891,7 +958,10 @@ class RepoPeople:
                                 json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
 
         async with aiohttp.ClientSession() as session:
-            await asyncio.gather(*[_fetch_one(session, login) for login in filtered])
+            try:
+                await asyncio.gather(*[_fetch_one(session, login) for login in filtered])
+            except Exception as e:
+                print(f"  [ERROR] Unexpected error during async fetch: {e}")
 
         if failed:
             print(f"  Skipped {len(failed)} user(s): {failed}")
@@ -911,7 +981,7 @@ class RepoPeople:
         verbose: bool = True,
         fields: Optional[List[str]] = None,
         concurrency: int = 10,
-    ) -> Dict[str, dict]:
+    ) -> UserDataView:
         """
         Async version of get_users.
 

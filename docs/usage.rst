@@ -72,6 +72,20 @@ descriptive message rather than failing silently on the first API call:
    except ConnectionError as e:
        print(e)  # GitHub connection failed — verify your token. (...)
 
+Input Validation
+----------------
+
+The ``owner`` and ``repo`` parameters are validated at construction time.
+Both must contain only ``[A-Za-z0-9_.-]`` characters. Any other characters
+raise a ``ValueError`` immediately:
+
+.. code-block:: python
+
+   try:
+       rp = RepoPeople("owner with spaces", "repo")
+   except ValueError as e:
+       print(e)  # Invalid owner: 'owner with spaces'. Must match [A-Za-z0-9_.-]+
+
 Choosing an Output Directory
 -----------------------------
 
@@ -168,9 +182,9 @@ Incremental Fetching (Resume Support)
 --------------------------------------
 
 For large repositories the fetch can take a long time. Use
-``save_each_iteration=True`` to write the result file after every single user
-profile is fetched. If the process is interrupted, restart with
-``resume=True`` to pick up from where you left off:
+``save_each_iteration=True`` to persist progress in batches of 10 user
+profiles. If the process is interrupted, restart with ``resume=True`` to
+pick up from where you left off:
 
 .. code-block:: python
 
@@ -345,7 +359,7 @@ Rate-Limit Tips
 * Use ``limit`` during development to avoid exhausting the rate limit on large repos.
 * Use ``exclude_bots=True`` to skip bot accounts that do not need enrichment.
 * Use ``save_each_iteration=True`` on very large repos so partial progress is
-  persisted if the rate limit is hit mid-run.
+  persisted (every 10 profiles) if the rate limit is hit mid-run.
 * ``resume=True`` allows you to continue after hitting a rate limit without
   re-fetching profiles already collected.* A progress line is printed automatically every 50 users and at the end of
   the fetch, showing the current rate-limit headroom::
@@ -380,3 +394,42 @@ Or pass it directly to the lower-level method:
    Concurrent requests still count against your rate limit. ``workers``
    reduces wall-clock time by overlapping requests, not by increasing the
    total request budget.
+
+   The maximum value for ``workers`` is **32**. If a higher value is passed,
+   it is silently capped to 32 and a :class:`UserWarning` is emitted.
+
+Async Fetching
+--------------
+
+For very high concurrency use the async pipeline. This requires the optional
+``aiohttp`` dependency:
+
+.. code-block:: console
+
+   pip install "repo-people[async]"
+
+Then:
+
+.. code-block:: python
+
+   import asyncio
+
+   user_data = asyncio.run(rp.get_users_async(concurrency=10))
+
+Exporting as JSON Lines (JSONL)
+-------------------------------
+
+Pass ``lines=True`` to :meth:`~repo_people.RepoPeople.export_to_json` to write
+one JSON object per line (JSONL / JSON Lines format). This is useful for
+streaming large outputs:
+
+.. code-block:: python
+
+   path = rp.export_to_json(user_data, lines=True)
+   # Writes <outdir>/<prefix>user_details.jsonl
+
+You can also specify a custom filename:
+
+.. code-block:: python
+
+   path = rp.export_to_json(user_data, filename="users.jsonl", lines=True)

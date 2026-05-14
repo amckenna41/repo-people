@@ -426,6 +426,14 @@ class TestSnapshot(unittest.TestCase):
         snap = self._snap()
         self.assertEqual(snap.orgs_public_count, len(snap.public_orgs))
 
+    def test_default_excludes_expensive_fields(self):
+        """snapshot() with no args must default to include_langs=False and
+        include_star_fork_sums=False (opt-in, these iterate all public repos)."""
+        snap = self.info.snapshot()
+        self.assertIsNone(snap.top_languages, "top_languages should be None by default")
+        self.assertIsNone(snap.total_public_stars_sampled, "stars should be None by default")
+        self.assertIsNone(snap.total_public_forks_sampled, "forks should be None by default")
+
 
 # ---------------------------------------------------------------------------
 # to_dict() tests

@@ -213,3 +213,7 @@ ARTICLE.md
 .DS_Store
 
 tests/test_output/
+
+node_modules/
+
+TODO.md

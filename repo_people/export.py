@@ -13,12 +13,17 @@ API_BASE_URL = "https://api.github.com"
 BASE = "https://github.com"
 
 
-def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export all unique commit authors (usernames) for a repository to CSV and/or return as list.
+    Export all unique commit authors (usernames) for a repository.
 
     Pages through /commits and collects unique author.login values, so there is no
-    hard cap on the number of results returned.
+    hard cap on the number of results returned.  Always returns the list of logins;
+    the ``return_data`` parameter is kept for backwards compatibility but is ignored.
+
+    .. note::
+        ``export_contributors`` and ``export_commit_authors`` walk the same ``/commits``
+        endpoint and return equivalent results.  They are aliases of each other.
     """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/commits"
     authors: set = set()
@@ -31,14 +36,24 @@ def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: s
     usernames = sorted(authors)
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_commit_authors.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
 
-def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = False, export_csv: bool = False, limit: int = None, sleep: float = 1.0):
+def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = True, export_csv: bool = False, limit: Optional[int] = None, sleep: float = 1.0) -> List[str]:
     """
-    Scrape and export the list of dependent users (usernames) for a repo to CSV and/or return as list.
+    Scrape and export the list of dependent users (usernames) for a repo.
+
+    Always returns the list of logins; ``return_data`` is kept for backwards
+    compatibility but is ignored.  Uses exponential back-off on non-200 responses.
+
+    Parameters
+    ----------
+    limit:
+        Maximum number of unique dependent repositories to collect before stopping.
+        ``None`` (default) collects all pages.  Pass ``0`` for an empty result.
+    sleep:
+        Base sleep interval (seconds) between pages.  Doubles on each failed page
+        request up to a maximum of 60 seconds.
     """
     url = f"{BASE}/{owner}/{repo}/network/dependents?dependent_type=REPOSITORY"
     session = requests.Session()
@@ -47,12 +62,22 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Fa
         "Accept": "text/html,application/xhtml+xml",
     })
     seen, out = set(), []
+    # Short-circuit: limit=0 means caller wants an empty result
+    if limit is not None and limit == 0:
+        return []
     page_num = 0
+    current_sleep = sleep
     while url:
         page_num += 1
         r = session.get(url, timeout=30, allow_redirects=True)
         if r.status_code != 200:
+            # Exponential back-off: double sleep up to 60 s, then give up
+            current_sleep = min(current_sleep * 2, 60.0)
+            print(f"  [WARN] export_dependents: page {page_num} returned {r.status_code}; "
+                  f"sleeping {current_sleep:.0f}s before retry.", flush=True)
+            time.sleep(current_sleep)
             break
+        current_sleep = sleep  # reset on success
         soup = BeautifulSoup(r.text, "html.parser")
         container = soup.select_one("div.paginate-container")
         rows = container.select("div.Box-row") if container else soup.select("div.Layout div.Layout-main div.Box-row")
@@ -81,7 +106,7 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Fa
                 seen.add(full)
                 filtered.append(full)
         out.extend(filtered)
-        if limit and len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
         next_a = soup.select_one('div.paginate-container a.next_page:not(.disabled), div.paginate-container a[rel="next"]:not(.disabled)')
         next_url = urljoin(BASE, next_a["href"]) if next_a and next_a.get("href") else None
@@ -95,17 +120,19 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Fa
     usernames = sorted({full.split("/", 1)[0] for full in out})
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_dependents.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
-def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export all unique contributors (usernames) for a repository to CSV and/or return as list.
+    Export all unique contributors (usernames) for a repository.
 
     Bypasses the /contributors endpoint's hard 100-item cap by paging through /commits
     and collecting unique author.login values — the same commit-walk approach used by
-    export_commit_authors. Both functions return equivalent sets of usernames.
+    ``export_commit_authors``.  Both functions return equivalent sets of usernames and
+    are aliases of each other.
+
+    Always returns the list of logins; ``return_data`` is kept for backwards compatibility
+    but is ignored.
     """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/commits"
     authors: set = set()
@@ -118,9 +145,7 @@ def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str
     usernames = sorted(authors)
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_contributors.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
 
 def fetch_codeowners(owner: str, repo: str, token: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -153,7 +178,7 @@ def parse_codeowners_owners(text: str) -> List[str]:
 
 
 
-def export_stargazers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_stargazers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/stargazers"
     usernames = []
     try:
@@ -169,12 +194,10 @@ def export_stargazers(owner: str, repo: str, token: Optional[str], outdir: str, 
             raise
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_stargazers.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
 
-def export_watchers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_watchers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/subscribers"
     usernames = []
     try:
@@ -189,12 +212,10 @@ def export_watchers(owner: str, repo: str, token: Optional[str], outdir: str, re
             raise
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_watchers.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
 
-def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/issues"
     usernames = set()
     try:
@@ -211,12 +232,10 @@ def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: st
     usernames = sorted(usernames)
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_issue_authors.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
 
-def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = False, export_csv: bool = False):
+def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls"
     usernames = set()
     try:
@@ -233,11 +252,9 @@ def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, 
     usernames = sorted(usernames)
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_pr_authors.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
-def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str, skip_codeowners: bool, skip_collaborators: bool, return_data: bool = False, export_csv: bool = False):
+def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str, skip_codeowners: bool, skip_collaborators: bool, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
     Export maintainers for a repository to CSV and/or return as list.
 
@@ -279,22 +296,21 @@ def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str,
                         "permissions": ";".join([k for k,v in perms.items() if v]),
                         "url": c.get("html_url")
                     })
-    # dedupe
+    # dedupe by login/team name only — the same person in both CODEOWNERS and
+    # collaborators is still one maintainer, regardless of which source listed them.
     seen = set()
     usernames = []
     for r in rows:
-        key = (r["login_or_team"], r["source"])
+        key = r["login_or_team"]
         if key in seen:
             continue
         seen.add(key)
         usernames.append(r["login_or_team"])
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_maintainers.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 
-def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = None, return_data: bool = False, export_csv: bool = False):
+def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = None, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
     Export the owners of all forks for a repository to CSV and/or return as list.
     """
@@ -307,7 +323,5 @@ def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = N
             usernames.append(login)
     if export_csv and outdir:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_fork_owners.csv"), ["login"], [[u] for u in usernames])
-    if return_data:
-        return usernames
-    return len(usernames)
+    return usernames
 

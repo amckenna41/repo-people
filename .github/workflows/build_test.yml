@@ -29,9 +29,9 @@ jobs:
             os: [ubuntu-latest]
             python-version: ["3.10", "3.11"]   #testing on multiple python versions
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Set up Python ${{ matrix.python-version }} #checkout repo
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }} #install python version
 
@@ -60,9 +60,9 @@ jobs:
             os: [ubuntu-latest]
             python-version: ["3.10"]   #testing on multiple python versions
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -90,7 +90,7 @@ jobs:
 
     #upload test artifacts to workflow
     - name: Upload Test Artifacts
-      uses: actions/upload-artifact@v4.6.2
+      uses: actions/upload-artifact@v7
       with:
         name: test_artifacts
         path: |
@@ -107,7 +107,7 @@ jobs:
     steps:
       #checkout repo
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       #install all required modules and dependencies using pip installation
       - name: Install dependencies
@@ -131,7 +131,7 @@ jobs:
       
       #upload artifacts to repo
       - name: Upload flake8 Artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7
         with:
           name: flake8_artifact
           path: flake8_artifacts/flake8_output.txt
@@ -147,7 +147,7 @@ jobs:
     steps:
       #Checkout repo
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       #Install dependencies
       - name: Install dependencies
@@ -165,7 +165,7 @@ jobs:
           
       #Upload coverage report as an artifact
       - name: Upload Coverage Report Artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.xml
@@ -173,8 +173,8 @@ jobs:
 
       #Upload coverage report to Codecov
       - name: Upload Coverage to Codecov
-        # uses: actions/checkout@v4
-        uses: codecov/codecov-action@v3
+        # uses: actions/checkout@v6
+        uses: codecov/codecov-action@v6
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:

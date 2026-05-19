@@ -283,6 +283,85 @@ class ExportUnitTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# PR reviewers unit tests
+# ---------------------------------------------------------------------------
+
+class TestExportPrReviewers(unittest.TestCase):
+    """Unit tests for export_pr_reviewers."""
+
+    def test_returns_unique_sorted_reviewer_logins(self):
+        """Collects reviewers across multiple PRs and deduplicates them."""
+        prs_payload = [{"number": 1}, {"number": 2}]
+        reviews_pr1 = [{"user": {"login": "alice"}}, {"user": {"login": "bob"}}]
+        reviews_pr2 = [{"user": {"login": "alice"}}, {"user": {"login": "carol"}}]
+
+        def side_effect(url, **kwargs):
+            if "/pulls/1/reviews" in url:
+                return _mock_response(reviews_pr1)
+            if "/pulls/2/reviews" in url:
+                return _mock_response(reviews_pr2)
+            return _mock_response(prs_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", side_effect=side_effect):
+                result = export.export_pr_reviewers(
+                    owner="o", repo="r", token=None, outdir=tmpdir
+                )
+        self.assertEqual(result, ["alice", "bob", "carol"])
+
+    def test_returns_empty_list_when_no_prs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", return_value=_mock_response([])):
+                result = export.export_pr_reviewers(
+                    owner="o", repo="r", token=None, outdir=tmpdir
+                )
+        self.assertEqual(result, [])
+
+    def test_skips_reviews_with_no_user(self):
+        prs_payload = [{"number": 1}]
+        reviews = [{"user": None}, {"user": {"login": "alice"}}, {}]
+
+        def side_effect(url, **kwargs):
+            if "/reviews" in url:
+                return _mock_response(reviews)
+            return _mock_response(prs_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", side_effect=side_effect):
+                result = export.export_pr_reviewers(
+                    owner="o", repo="r", token=None, outdir=tmpdir
+                )
+        self.assertEqual(result, ["alice"])
+
+    def test_csv_created_when_export_csv_true(self):
+        prs_payload = [{"number": 1}]
+        reviews = [{"user": {"login": "alice"}}]
+
+        def side_effect(url, **kwargs):
+            if "/reviews" in url:
+                return _mock_response(reviews)
+            return _mock_response(prs_payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", side_effect=side_effect):
+                export.export_pr_reviewers(
+                    owner="o", repo="r", token=None, outdir=tmpdir, export_csv=True
+                )
+            self.assertTrue(
+                os.path.isfile(os.path.join(tmpdir, "o_r_pr_reviewers.csv"))
+            )
+
+    def test_return_data_param_is_ignored(self):
+        """return_data=False still returns a list (backwards-compat param is deprecated)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("repo_people.export.requests.get", return_value=_mock_response([])):
+                result = export.export_pr_reviewers(
+                    owner="o", repo="r", token=None, outdir=tmpdir, return_data=False
+                )
+        self.assertIsInstance(result, list)
+
+
+# ---------------------------------------------------------------------------
 # Structure/setup validation test (no API calls)
 # ---------------------------------------------------------------------------
 

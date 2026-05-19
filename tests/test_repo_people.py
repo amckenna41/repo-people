@@ -16,7 +16,7 @@ unittest.TestLoader.sortTestMethodsUsing = None
 _ALL_EXPORT_ATTRS = (
     "export_contributors", "export_maintainers", "export_stargazers",
     "export_watchers", "export_issue_authors", "export_pr_authors",
-    "export_fork_owners", "export_commit_authors", "export_dependents",
+    "export_pr_reviewers", "export_fork_owners", "export_commit_authors", "export_dependents",
 )
 
 def _stub_export(mock_export, logins=None):
@@ -76,10 +76,11 @@ class TestRepoPeopleInit(unittest.TestCase):
         self.assertFalse(rp.skip_collaborators)
 
     def test_valid_roles_class_attribute(self):
-        """VALID_ROLES contains all nine expected role keys."""
+        """VALID_ROLES contains all ten expected role keys."""
         expected = {
             "contributors", "maintainers", "stargazers", "watchers",
-            "issue_authors", "pr_authors", "fork_owners", "commit_authors", "dependents",
+            "issue_authors", "pr_authors", "pr_reviewers", "fork_owners",
+            "commit_authors", "dependents",
         }
         self.assertEqual(RepoPeople.VALID_ROLES, expected)
 
@@ -1395,6 +1396,124 @@ class TestCompare(unittest.TestCase):
         self.assertEqual(result["only_in_self"], sorted(result["only_in_self"]))
         self.assertEqual(result["only_in_other"], sorted(result["only_in_other"]))
         self.assertEqual(result["in_both"], sorted(result["in_both"]))
+
+
+# ---------------------------------------------------------------------------
+# TestExportToXlsx
+# ---------------------------------------------------------------------------
+
+class TestExportToXlsx(unittest.TestCase):
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def test_creates_xlsx_file(self):
+        openpyxl = __import__("importlib").util.find_spec("openpyxl")
+        if openpyxl is None:
+            self.skipTest("openpyxl not installed")
+        import openpyxl as xl
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            user_data = {"alice": {"login": "alice", "name": "Alice", "followers": 5}}
+            path = self.rp.export_to_xlsx(user_data)
+            self.assertTrue(os.path.isfile(path))
+            wb = xl.load_workbook(path)
+            ws = wb.active
+            headers = [cell.value for cell in ws[1]]
+            self.assertIn("login", headers)
+
+    def test_returns_empty_string_when_no_data(self):
+        self.assertEqual(self.rp.export_to_xlsx({}), "")
+
+    def test_list_fields_serialised_as_semicolon_separated(self):
+        if __import__("importlib").util.find_spec("openpyxl") is None:
+            self.skipTest("openpyxl not installed")
+        import openpyxl as xl
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            user_data = {"alice": {"login": "alice", "public_orgs": ["org1", "org2"]}}
+            path = self.rp.export_to_xlsx(user_data)
+            wb = xl.load_workbook(path)
+            ws = wb.active
+            headers = [cell.value for cell in ws[1]]
+            orgs_col = headers.index("public_orgs") + 1
+            self.assertEqual(ws.cell(row=2, column=orgs_col).value, "org1;org2")
+
+    def test_raises_import_error_without_openpyxl(self):
+        import sys
+        with patch.dict(sys.modules, {"openpyxl": None}):
+            with self.assertRaises(ImportError) as ctx:
+                self.rp.export_to_xlsx({"alice": {"login": "alice"}})
+        self.assertIn("openpyxl", str(ctx.exception))
+
+    def test_custom_filename(self):
+        if __import__("importlib").util.find_spec("openpyxl") is None:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            path = self.rp.export_to_xlsx({"u": {"login": "u"}}, filename="out.xlsx")
+            self.assertTrue(path.endswith("out.xlsx"))
+
+
+# ---------------------------------------------------------------------------
+# TestDiffSnapshots
+# ---------------------------------------------------------------------------
+
+class TestDiffSnapshots(unittest.TestCase):
+
+    def test_joined_left_and_unchanged(self):
+        old = {"alice": {"login": "alice"}, "bob": {"login": "bob"}}
+        new = {"alice": {"login": "alice"}, "carol": {"login": "carol"}}
+        result = RepoPeople.diff_snapshots(old, new)
+        self.assertEqual(result["joined"], ["carol"])
+        self.assertEqual(result["left"], ["bob"])
+        self.assertEqual(result["unchanged"], ["alice"])
+
+    def test_all_new_users(self):
+        result = RepoPeople.diff_snapshots({}, {"alice": {}, "bob": {}})
+        self.assertEqual(sorted(result["joined"]), ["alice", "bob"])
+        self.assertEqual(result["left"], [])
+        self.assertEqual(result["unchanged"], [])
+
+    def test_all_left(self):
+        result = RepoPeople.diff_snapshots({"alice": {}, "bob": {}}, {})
+        self.assertEqual(result["joined"], [])
+        self.assertEqual(sorted(result["left"]), ["alice", "bob"])
+
+    def test_no_changes(self):
+        data = {"alice": {"login": "alice"}}
+        result = RepoPeople.diff_snapshots(data, data)
+        self.assertEqual(result["joined"], [])
+        self.assertEqual(result["left"], [])
+        self.assertEqual(result["unchanged"], ["alice"])
+
+    def test_loads_from_json_files(self):
+        old = {"alice": {"login": "alice"}}
+        new = {"alice": {"login": "alice"}, "bob": {"login": "bob"}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_path = os.path.join(tmpdir, "old.json")
+            new_path = os.path.join(tmpdir, "new.json")
+            with open(old_path, "w") as f:
+                json.dump(old, f)
+            with open(new_path, "w") as f:
+                json.dump(new, f)
+            result = RepoPeople.diff_snapshots(old_path, new_path)
+        self.assertEqual(result["joined"], ["bob"])
+        self.assertEqual(result["left"], [])
+
+    def test_output_lists_are_sorted(self):
+        old = {"z": {}, "a": {}, "m": {}}
+        new = {"z": {}, "b": {}, "n": {}}
+        result = RepoPeople.diff_snapshots(old, new)
+        self.assertEqual(result["joined"], sorted(result["joined"]))
+        self.assertEqual(result["left"], sorted(result["left"]))
+        self.assertEqual(result["unchanged"], sorted(result["unchanged"]))
 
 
 if __name__ == "__main__":

@@ -146,7 +146,8 @@ class RepoPeople:
     # All valid role keys that can be passed to the roles parameter
     VALID_ROLES: Set[str] = {
         "contributors", "maintainers", "stargazers", "watchers",
-        "issue_authors", "pr_authors", "fork_owners", "commit_authors", "dependents",
+        "issue_authors", "pr_authors", "pr_reviewers", "fork_owners",
+        "commit_authors", "dependents",
     }
 
     def collect_all_usernames(
@@ -197,6 +198,9 @@ class RepoPeople:
             ),
             "dependents": lambda: export.export_dependents(
                 self.owner, self.repo, self.outdir, return_data=True
+            ),
+            "pr_reviewers": lambda: export.export_pr_reviewers(
+                self.owner, self.repo, self.token, self.outdir, return_data=True
             ),
         }
         # Only fetch the requested roles (lazy — avoids unnecessary API calls)
@@ -414,6 +418,53 @@ class RepoPeople:
                 writer.writerow(row)
         return path
 
+    def export_to_xlsx(
+        self,
+        user_data: Dict[str, dict],
+        filename: Optional[str] = None,
+    ) -> str:
+        """
+        Write user data to an Excel (.xlsx) file in outdir.
+
+        List/tuple fields are serialised as semicolon-separated strings.
+        Returns the output path, or an empty string if user_data is empty.
+        Requires ``openpyxl``: install with ``pip install openpyxl`` or
+        ``pip install repo-people[excel]``.
+        """
+        if not user_data:
+            return ""
+        try:
+            import openpyxl
+        except ImportError as exc:
+            raise ImportError(
+                "openpyxl is required for Excel export. "
+                "Install it with: pip install openpyxl"
+            ) from exc
+
+        filename = filename or f"{self.file_prefix}user_details.xlsx"
+        os.makedirs(self.outdir, exist_ok=True)
+        path = os.path.join(self.outdir, filename)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Users"
+
+        fields = list(next(iter(user_data.values())).keys())
+        ws.append(fields)
+        for record in user_data.values():
+            row = []
+            for field in fields:
+                value = record.get(field)
+                if isinstance(value, (list, tuple)):
+                    value = ";".join(str(x) for x in value)
+                elif value is None:
+                    value = ""
+                row.append(value)
+            ws.append(row)
+
+        wb.save(path)
+        return path
+
     def export_to_markdown(
         self,
         user_data: Dict[str, dict],
@@ -603,10 +654,50 @@ class RepoPeople:
             "in_both": sorted(logins_self & logins_other),
         }
 
+    @staticmethod
+    def diff_snapshots(
+        old: "Union[Dict[str, dict], str]",
+        new: "Union[Dict[str, dict], str]",
+    ) -> "Dict[str, List[str]]":
+        """
+        Compare two user-data snapshots and return who joined and who left.
+
+        Each argument can be either a ``dict`` (as returned by :meth:`get_users`)
+        or a file-system path to a JSON file previously written by
+        :meth:`export_to_json`.
+
+        Returns a dict with three keys:
+
+        - ``"joined"``    — logins present in *new* but not in *old*.
+        - ``"left"``      — logins present in *old* but not in *new*.
+        - ``"unchanged"`` — logins present in both snapshots.
+
+        Example::
+
+            diff = RepoPeople.diff_snapshots("snapshot_jan.json", "snapshot_feb.json")
+            print(diff["joined"])   # new users
+            print(diff["left"])     # users who disappeared
+        """
+        if isinstance(old, str):
+            with open(old, "r", encoding="utf-8") as f:
+                old = json.load(f)
+        if isinstance(new, str):
+            with open(new, "r", encoding="utf-8") as f:
+                new = json.load(f)
+
+        old_logins = set(old.keys())
+        new_logins = set(new.keys())
+        return {
+            "joined": sorted(new_logins - old_logins),
+            "left": sorted(old_logins - new_logins),
+            "unchanged": sorted(old_logins & new_logins),
+        }
+
     def get_users(
         self,
         export: bool = False,
         export_csv: bool = False,
+        export_xlsx: bool = False,
         save_each_iteration: bool = False,
         limit: Optional[int] = None,
         roles: Optional[List[str]] = None,
@@ -630,6 +721,7 @@ class RepoPeople:
         Parameters:
             export            -- save results to user_details.json when True.
             export_csv        -- save results to user_details.csv when True.
+            export_xlsx       -- save results to user_details.xlsx when True (requires openpyxl).
             save_each_iteration -- write user_details.json after every successful fetch.
             limit             -- stop after fetching this many user profiles.
             roles             -- only collect users from these role categories
@@ -727,6 +819,10 @@ class RepoPeople:
         if export_csv:
             path = self.export_to_csv(user_data)
             print(f"Exported to: {path}")
+        if export_xlsx:
+            path = self.export_to_xlsx(user_data)
+            if path:
+                print(f"Exported to: {path}")
 
         return UserDataView(user_data)
 

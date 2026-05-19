@@ -325,3 +325,37 @@ def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = N
         write_csv(os.path.join(outdir, f"{owner}_{repo}_fork_owners.csv"), ["login"], [[u] for u in usernames])
     return usernames
 
+
+def export_pr_reviewers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
+    """
+    Export all unique PR reviewer usernames for a repository.
+
+    Pages through all open and closed PRs, then fetches the review list for
+    each PR to collect unique reviewer logins.  This requires one API call per
+    PR in addition to the initial PR listing, so it can be slow on repos with
+    many pull requests.
+
+    Always returns the list of logins; ``return_data`` is kept for backwards
+    compatibility but is ignored.
+    """
+    prs_url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls"
+    pr_numbers: List[int] = []
+    for pr in paginate(prs_url, token, params={"state": "all"}):
+        pr_num = pr.get("number")
+        if pr_num:
+            pr_numbers.append(pr_num)
+
+    reviewers: set = set()
+    for pr_num in pr_numbers:
+        reviews_url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls/{pr_num}/reviews"
+        for review in paginate(reviews_url, token):
+            user = review.get("user") or {}
+            login = user.get("login")
+            if login:
+                reviewers.add(login)
+
+    usernames = sorted(reviewers)
+    if export_csv:
+        write_csv(os.path.join(outdir, f"{owner}_{repo}_pr_reviewers.csv"), ["login"], [[u] for u in usernames])
+    return usernames
+

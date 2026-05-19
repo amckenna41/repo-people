@@ -9,7 +9,7 @@
 [![codecov](https://codecov.io/gh/amckenna41/repo-people/branch/main/graph/badge.svg?token=4PQDVGKGYN)](https://codecov.io/gh/amckenna41/repo-people)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/amckenna41/repo-people/refs/heads/main/images/logo.png" alt="repo-people logo" width="300"/>
+  <img src="https://github.com/amckenna41/repo-people/blob/main/images/logo.png" alt="repo-people logo" width="300"/>
 </p>
 
 **repo-people** is a Python package that collects and exports the full GitHub profile for every person associated with a repository — contributors, maintainers, stargazers, watchers, issue/PR authors, fork owners, commit authors and dependents.

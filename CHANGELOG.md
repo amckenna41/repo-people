@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-07-14
+
+### Fixed
+
+- **`paginate()` infinite loop on a non-rate-limit `403`** — a `403` with no `X-RateLimit-Reset` / `Retry-After` header (e.g. a genuinely forbidden resource) previously retried forever with a 10 s back-off. Retries are now capped at 5, after which the error surfaces via `raise_for_status()`.
+- **Sync/async output divergence** — the async pipeline (`get_user_details_async`) computed `top_languages`, `total_public_stars_sampled`, and `total_public_forks_sampled` while the sync pipeline left them `None`, so the two paths produced different records for the same user. These aggregates are expensive and off by default (see `snapshot()` defaults), so the async path now also leaves them `None`, matching sync. As a result async makes **3** requests per user instead of 4 (the owned-repos fetch is dropped).
+- **`export_dependents` wasted sleep on failure** — on a non-200 page the function doubled a back-off timer and slept before an unconditional `break`, i.e. it slept then gave up without ever retrying. It now stops immediately on the first non-200 response. (Supersedes the "exponential back-off" behaviour listed under 1.0.0, which never actually retried.)
+- **`export_to_csv` dropped columns** — the CSV header was derived from the first record only, so any key unique to a later record (e.g. after `resume` merges an older file with a different field set) was silently omitted. The header is now the union of keys across all records.
+
+### Added
+
+- **Request timeouts** — added a 30 s timeout to `paginate()`, `fetch_codeowners()`, and the async `aiohttp.ClientSession`. Previously a hung/black-holed connection on these paths could block a run indefinitely (only `social_accounts()` and the dependents scraper had timeouts).
+- **Thread-safe concurrent fetching** — `get_user_details(workers>1)` now gives each worker thread its own `Github` client instead of sharing one (PyGithub wraps a non-thread-safe `requests.Session`). The default single-worker path is unchanged and its live rate-limit readout is preserved.
+- **No-token warning** — `RepoPeople(...)` now emits a `UserWarning` at construction when no token is provided (and `GITHUB_TOKEN` is unset), noting the 60-requests/hour unauthenticated limit, instead of silently crawling into rate limits.
+- **Tests** — `test_persistent_403_is_retried_a_bounded_number_of_times` (paginate retry cap) and `test_header_is_union_of_all_record_keys` (CSV column union).
+
+### Changed
+
+- **`docs/usage.rst`** — corrected the `summarise()` example output to the keys the method actually returns (`total`, `humans`, `bots`, `top_locations`, `top_companies`, `account_age_distribution`, `role_distribution`); removed the stale `top_languages` key from that example.
+- **`README.md`** — documented the new no-token `UserWarning` in the Authentication section.
+
+---
+
 ## [1.0.0] - 2026-05-14
 
 ### Added

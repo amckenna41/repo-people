@@ -281,6 +281,20 @@ class ExportUnitTests(unittest.TestCase):
         # Only one HTTP request should be made (no next page)
         mock_get.assert_called_once()
 
+    def test_persistent_403_is_retried_a_bounded_number_of_times(self):
+        """A 403 with no rate-limit headers must not loop forever (regression)."""
+        import requests as _requests
+        resp = _mock_response([], status_code=403)
+        resp.headers = {}  # no X-RateLimit-Reset / Retry-After -> short fixed backoff path
+        # Once retries are exhausted, a real Response would raise on raise_for_status().
+        resp.raise_for_status.side_effect = _requests.exceptions.HTTPError("403")
+        with patch("repo_people.utils.requests.get", return_value=resp) as mock_get, \
+             patch("repo_people.utils.time.sleep"):
+            with self.assertRaises(_requests.exceptions.HTTPError):
+                list(export.paginate("https://api.github.com/x", token=None))
+        # 1 initial request + 5 capped retries = 6; then it gives up rather than looping.
+        self.assertEqual(mock_get.call_count, 6)
+
 
 # ---------------------------------------------------------------------------
 # PR reviewers unit tests

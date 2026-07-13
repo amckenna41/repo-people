@@ -434,6 +434,23 @@ class TestExportToCsv(unittest.TestCase):
                 rows = list(csv_mod.DictReader(f))
             self.assertEqual(rows[0]["public_orgs"], "org1;org2")
 
+    def test_header_is_union_of_all_record_keys(self):
+        """Columns unique to later records (e.g. after a resume merge) aren't dropped."""
+        import csv as csv_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.rp.outdir = tmpdir
+            # 'bob' has an 'email' key that the first record lacks.
+            user_data = {
+                "alice": {"login": "alice", "name": "Alice"},
+                "bob": {"login": "bob", "email": "bob@example.com"},
+            }
+            path = self.rp.export_to_csv(user_data)
+            with open(path, newline="") as f:
+                reader = csv_mod.DictReader(f)
+                self.assertIn("email", reader.fieldnames)
+                rows = {r["login"]: r for r in reader}
+            self.assertEqual(rows["bob"]["email"], "bob@example.com")
+
 
 class TestExportToMarkdown(unittest.TestCase):
 
@@ -971,8 +988,10 @@ class TestGetUserDetailsAsync(unittest.TestCase):
         # alice from disk, bob fetched fresh
         self.assertIn("alice", result)
         self.assertIn("bob", result)
-        # session.get is now called 4 times per user (base profile + orgs + events + repos)
-        self.assertEqual(session_mock.get.call_count, 4)
+        # session.get is called 3 times per user (base profile + orgs + events).
+        # Owned repos are no longer fetched: the star/fork/language aggregates are
+        # off by default, matching the sync path.
+        self.assertEqual(session_mock.get.call_count, 3)
 
 
 class TestGetUsersAsync(unittest.TestCase):

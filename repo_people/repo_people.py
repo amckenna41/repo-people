@@ -99,6 +99,15 @@ class RepoPeople:
         # Store token as a private attribute to reduce accidental exposure
         # (e.g. in repr(), vars(), or debug logs).
         self._token = token
+        # Warn early: unauthenticated runs are capped at 60 requests/hour and will
+        # crawl to a halt on any non-trivial repo. Surface it before the slow part.
+        if token is None:
+            warnings.warn(
+                "No GitHub token provided — unauthenticated requests are limited to "
+                "60/hour and will likely hit rate limits. Pass token=... or set GITHUB_TOKEN.",
+                UserWarning,
+                stacklevel=2,
+            )
         # All files are stored flat in outputs/ with an owner_repo_ filename prefix
         self.outdir = outdir or "outputs"
         self.file_prefix = f"{owner}_{repo}_"
@@ -298,10 +307,28 @@ class RepoPeople:
         failed: List[str] = []
         lock = threading.Lock()
 
+        # PyGithub wraps a single non-thread-safe requests.Session, so sharing one
+        # client across worker threads can corrupt responses/rate-limit state. When
+        # running concurrently, give each thread its own client. The single-worker
+        # path keeps using self.gh (no races) so the rate-limit readout stays live.
+        _use_shared = workers <= 1
+        _tl = threading.local()
+        rate_client = {"gh": self.gh}  # most-recently-created client, for the rate readout
+
+        def _client() -> Github:
+            if _use_shared:
+                return self.gh
+            gh = getattr(_tl, "gh", None)
+            if gh is None:
+                gh = Github(auth=Auth.Token(self._token)) if self._token else Github()
+                _tl.gh = gh
+                rate_client["gh"] = gh
+            return gh
+
         def _fetch_one(login: str) -> dict:
             if verbose:
                 print(f"  Fetching: {login}")
-            info = GitHubUserInfo(self.gh, username=login)
+            info = GitHubUserInfo(_client(), username=login)
             return info.to_dict(include_social_accounts=include_social_accounts)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -332,8 +359,9 @@ class RepoPeople:
                 # response) so we don't burn an extra API call per progress update.
                 if completed % 50 == 0 or completed == total:
                     try:
-                        remaining, total_limit = self.gh.rate_limiting
-                        reset_epoch = self.gh.rate_limiting_resettime
+                        gh = rate_client["gh"]
+                        remaining, total_limit = gh.rate_limiting
+                        reset_epoch = gh.rate_limiting_resettime
                         reset_in = max(0, int((reset_epoch - time.time()) / 60))
                         print(
                             f"  [Progress: {completed}/{total} | "
@@ -404,8 +432,16 @@ class RepoPeople:
         filename = filename or f"{self.file_prefix}user_details.csv"
         os.makedirs(self.outdir, exist_ok=True)
         path = os.path.join(self.outdir, filename)
-        # Derive column names from the first record
-        fields = list(next(iter(user_data.values())).keys())
+        # Column names = union of keys across all records. Records can differ
+        # (e.g. after resume merges an older file, or fields filtering), so
+        # deriving columns from the first record alone would silently drop data.
+        fields: List[str] = []
+        seen_cols: Set[str] = set()
+        for record in user_data.values():
+            for k in record:
+                if k not in seen_cols:
+                    seen_cols.add(k)
+                    fields.append(k)
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
@@ -913,12 +949,11 @@ class RepoPeople:
 
                 base_url = f"https://api.github.com/users/{login}"
                 try:
-                    # Fetch base profile, orgs, latest public event, and owned repos concurrently
-                    raw, orgs_data, events_data, repos_data = await asyncio.gather(
+                    # Fetch base profile, orgs, and latest public event concurrently
+                    raw, orgs_data, events_data = await asyncio.gather(
                         _get_json(base_url),
                         _get_json(f"{base_url}/orgs", {"per_page": 100}),
                         _get_json(f"{base_url}/events/public", {"per_page": 1}),
-                        _get_json(f"{base_url}/repos", {"per_page": 50, "type": "owner"}),
                     )
                     if raw is None:
                         raise ValueError("HTTP error fetching base profile")
@@ -951,19 +986,6 @@ class RepoPeople:
                 # --- Last public event (for recently_active, matching sync path) ---
                 events_list = events_data if isinstance(events_data, list) else []
                 last_public_event_at = events_list[0].get("created_at", "") if events_list else ""
-
-                # --- Repos: top languages + star/fork sums (matches sync default include_langs=True) ---
-                repos_list = repos_data if isinstance(repos_data, list) else []
-                lang_counts: Dict[str, int] = {}
-                total_stars = 0
-                total_forks = 0
-                for r in repos_list:
-                    lang = r.get("language")
-                    if lang:
-                        lang_counts[lang] = lang_counts.get(lang, 0) + 1
-                    total_stars += r.get("stargazers_count", 0)
-                    total_forks += r.get("forks_count", 0)
-                top_languages = sorted(lang_counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
                 # --- Computed date/ratio metrics ---
                 created_str = raw.get("created_at", "") or ""
@@ -1034,9 +1056,11 @@ class RepoPeople:
                     "followers_following_ratio": followers_following_ratio,
                     "repos_per_year": repos_per_year,
                     "recently_active": recently_active,
-                    "top_languages": top_languages,
-                    "total_public_stars_sampled": total_stars,
-                    "total_public_forks_sampled": total_forks,
+                    # Aggregates are expensive and off by default — the sync path leaves
+                    # these None unless explicitly requested, so the async path matches.
+                    "top_languages": None,
+                    "total_public_stars_sampled": None,
+                    "total_public_forks_sampled": None,
                     # Optional fields not populated in async path (match sync defaults)
                     "ssh_keys_count": None,
                     "gpg_keys_count": None,
@@ -1053,7 +1077,7 @@ class RepoPeople:
                             with open(save_path, "w", encoding="utf-8") as f:
                                 json.dump(user_data, f, indent=2, ensure_ascii=False, default=str)
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             try:
                 await asyncio.gather(*[_fetch_one(session, login) for login in filtered])
             except Exception as e:

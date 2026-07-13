@@ -86,11 +86,15 @@ def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, acce
     params.setdefault("per_page", 100)
     _h = _headers(token, {"Accept": accept} if accept else None)
     while url:
-        resp = requests.get(url, headers=_h, params=params)
+        resp = requests.get(url, headers=_h, params=params, timeout=30)
         # Handle rate limit (403 / 429): sleep and retry
         rl_result = _sleep_if_ratelimited(resp)
-        while resp.status_code in (403, 429) and rl_result is True:
-            resp = requests.get(url, headers=_h, params=params)
+        # ponytail: cap retries so a persistent 403 that isn't a rate limit
+        # (e.g. forbidden resource with no reset header) can't loop forever.
+        attempts = 0
+        while resp.status_code in (403, 429) and rl_result is True and attempts < 5:
+            attempts += 1
+            resp = requests.get(url, headers=_h, params=params, timeout=30)
             rl_result = _sleep_if_ratelimited(resp)
         if resp.status_code in (403, 429) and rl_result == "skip":
             return

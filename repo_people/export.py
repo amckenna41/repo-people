@@ -44,7 +44,7 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Tr
     Scrape and export the list of dependent users (usernames) for a repo.
 
     Always returns the list of logins; ``return_data`` is kept for backwards
-    compatibility but is ignored.  Uses exponential back-off on non-200 responses.
+    compatibility but is ignored.  Stops paginating on the first non-200 response.
 
     Parameters
     ----------
@@ -52,8 +52,8 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Tr
         Maximum number of unique dependent repositories to collect before stopping.
         ``None`` (default) collects all pages.  Pass ``0`` for an empty result.
     sleep:
-        Base sleep interval (seconds) between pages.  Doubles on each failed page
-        request up to a maximum of 60 seconds.
+        Sleep interval (seconds) between successful page requests, to stay polite
+        to GitHub's HTML endpoint.
     """
     url = f"{BASE}/{owner}/{repo}/network/dependents?dependent_type=REPOSITORY"
     session = requests.Session()
@@ -66,18 +66,14 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Tr
     if limit is not None and limit == 0:
         return []
     page_num = 0
-    current_sleep = sleep
     while url:
         page_num += 1
         r = session.get(url, timeout=30, allow_redirects=True)
         if r.status_code != 200:
-            # Exponential back-off: double sleep up to 60 s, then give up
-            current_sleep = min(current_sleep * 2, 60.0)
-            print(f"  [WARN] export_dependents: page {page_num} returned {r.status_code}; "
-                  f"sleeping {current_sleep:.0f}s before retry.", flush=True)
-            time.sleep(current_sleep)
+            # ponytail: no retry follows, so don't sleep before giving up — just stop.
+            print(f"  [WARN] export_dependents: page {page_num} returned {r.status_code}; stopping.",
+                  flush=True)
             break
-        current_sleep = sleep  # reset on success
         soup = BeautifulSoup(r.text, "html.parser")
         container = soup.select_one("div.paginate-container")
         rows = container.select("div.Box-row") if container else soup.select("div.Layout div.Layout-main div.Box-row")
@@ -153,7 +149,7 @@ def fetch_codeowners(owner: str, repo: str, token: Optional[str]) -> Tuple[Optio
     candidates = [".github/CODEOWNERS", "docs/CODEOWNERS", "CODEOWNERS"]
     for path in candidates:
         url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{path}"
-        resp = requests.get(url, headers=_headers(token))
+        resp = requests.get(url, headers=_headers(token), timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, dict) and data.get("encoding") == "base64":

@@ -302,13 +302,13 @@ Returns aggregate statistics for the collected user data:
 
    stats = rp.summarise(user_data, top_n=5)
    # {
-   #   'total_users': 134,
-   #   'users_with_email': 42,
-   #   'users_with_blog': 61,
+   #   'total': 134,
+   #   'humans': 120,
+   #   'bots': 14,
    #   'top_locations': [('San Francisco', 18), ...],
    #   'top_companies': [('GitHub', 9), ...],
-   #   'top_languages': [('Python', 54), ...],
-   #   ...
+   #   'account_age_distribution': {'< 1 year': 5, '1–5 years': 40, ...},
+   #   'role_distribution': {'contributors': 30, 'stargazers': 110, ...},
    # }
 
 top_users

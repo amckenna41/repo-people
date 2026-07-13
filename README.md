@@ -141,7 +141,7 @@ import os
 rp = RepoPeople("owner", "repo", token=os.environ["GITHUB_TOKEN"])
 ```
 
-The token is validated immediately on construction — an invalid or expired token raises `ConnectionError` before any collection begins.
+The token is validated immediately on construction — an invalid or expired token raises `ConnectionError` before any collection begins. If no token is supplied (and `GITHUB_TOKEN` is unset), a `UserWarning` is emitted up front noting the 60-requests/hour unauthenticated limit.
 
 ### `RepoPeople()` Constructor
 

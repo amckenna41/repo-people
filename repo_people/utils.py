@@ -9,11 +9,27 @@ import requests
 
 def validate_owner_repo(owner: str, repo: str) -> None:
     """
-    Raise ValueError if *owner* or *repo* contain characters that are not
-    valid in a GitHub user/organisation name or repository name.
+    Validate a GitHub owner (user/organisation) and repository name, raising an
+    error if either contains characters that are not valid in a GitHub name.
+    GitHub permits only alphanumeric characters, hyphens, underscores and dots;
+    rejecting anything else here prevents URL/path injection further downstream.
 
-    GitHub enforces: alphanumeric, hyphens, underscores, and dots.
-    Rejecting anything else prevents URL/path injection.
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation) name to validate.
+    :repo: str
+        GitHub repository name to validate.
+
+    Returns
+    =======
+    None
+
+    Raises
+    ======
+    ValueError:
+        When the owner or repo is empty or contains any character other than
+        alphanumerics, hyphens, underscores or dots.
     """
     _SAFE = re.compile(r"^[A-Za-z0-9_.\-]+$")
     if not owner or not _SAFE.match(owner):
@@ -30,14 +46,22 @@ def validate_owner_repo(owner: str, repo: str) -> None:
 
 def _is_bot(login: str, user_type: str = "") -> bool:
     """
-    Return True if the account is a bot.
+    Determine whether a GitHub account is a bot. Uses the same criteria as the
+    sync path in ``users.py`` so both callers share a single source of truth: a
+    ``user_type`` of ``"bot"`` (case-insensitive), or a login ending in
+    ``[bot]`` or ``-bot``.
 
-    Matches the same criteria used by the sync path in ``users.py`` so
-    callers can share a single source of truth:
+    Parameters
+    ==========
+    :login: str
+        the account's GitHub login/username.
+    :user_type: str (default="")
+        the account's GitHub type (e.g. ``"User"``, ``"Bot"``), if known.
 
-    - ``user_type`` (case-insensitive) is ``"bot"``
-    - login ends with ``[bot]``
-    - login ends with ``-bot``
+    Returns
+    =======
+    :is_bot: bool
+        True if the account is identified as a bot, otherwise False.
     """
     if (user_type or "").lower() == "bot":
         return True
@@ -47,7 +71,23 @@ def _is_bot(login: str, user_type: str = "") -> bool:
 
 
 def _headers(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Build standard GitHub API request headers, optionally injecting a token."""
+    """
+    Build the standard set of GitHub API request headers, optionally injecting a
+    bearer token and any caller-supplied extra headers.
+
+    Parameters
+    ==========
+    :token: str/None
+        GitHub personal access token to send as a Bearer authorization header.
+        If None, no authorization header is added (unauthenticated request).
+    :extra: dict/None (default=None)
+        additional headers to merge into the returned dict, overriding defaults.
+
+    Returns
+    =======
+    :h: dict
+        dict of request headers ready to pass to ``requests``.
+    """
     h = {"Accept": "application/vnd.github+json", "User-Agent": "gh-census/0.1"}
     if token:
         h["Authorization"] = f"Bearer {token}"
@@ -57,7 +97,24 @@ def _headers(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Di
 
 
 def _sleep_if_ratelimited(resp: requests.Response):
-    """Sleep until the rate-limit window expires if a 403 or 429 is returned; returns 'skip' if wait is too long."""
+    """
+    Sleep until a GitHub rate-limit window expires when a 403 or 429 response is
+    returned, so the caller can safely retry the request. The wait is derived
+    from the ``X-RateLimit-Reset`` header (falling back to ``Retry-After``), and
+    is capped so an excessively long wait is skipped rather than blocking.
+
+    Parameters
+    ==========
+    :resp: requests.Response
+        the response object to inspect for a rate-limit status and headers.
+
+    Returns
+    =======
+    :result: bool/str
+        False if the response is not rate limited; True after sleeping (retry is
+        advised); the string ``"skip"`` if the required wait exceeds the maximum
+        allowed and the request should be abandoned.
+    """
     MAX_SLEEP = 60  # seconds
     if resp.status_code not in (403, 429):
         return False
@@ -81,7 +138,34 @@ def _sleep_if_ratelimited(resp: requests.Response):
 
 
 def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, accept: Optional[str] = None) -> Iterable[Dict]:
-    """Generic paginator for the GitHub REST API with rate-limit handling."""
+    """
+    Generic paginator for the GitHub REST API that transparently follows the
+    ``Link`` header, handles rate limiting (403/429) with bounded retries, and
+    yields each item across all pages. Both list responses and search-style
+    ``{"items": [...]}`` responses are supported.
+
+    Parameters
+    ==========
+    :url: str
+        the initial GitHub API URL to request.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :params: dict/None (default=None)
+        query-string parameters for the first request. ``per_page`` defaults to
+        100 if not supplied.
+    :accept: str/None (default=None)
+        custom ``Accept`` header value (e.g. for a preview media type).
+
+    Returns
+    =======
+    :item: dict
+        yields each item dict from every page in turn.
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        When a non-200 response other than 403/429/404 is returned.
+    """
     params = dict(params or {})
     params.setdefault("per_page", 100)
     _h = _headers(token, {"Accept": accept} if accept else None)
@@ -120,7 +204,23 @@ def paginate(url: str, token: Optional[str], params: Optional[Dict] = None, acce
 
 
 def write_csv(path: str, header: List[str], rows: Iterable[Iterable]) -> None:
-    """Write a CSV file, creating parent directories as needed."""
+    """
+    Write rows to a CSV file at the given path, creating any missing parent
+    directories first.
+
+    Parameters
+    ==========
+    :path: str
+        destination file path for the CSV output.
+    :header: list
+        list of column header strings written as the first row.
+    :rows: iterable
+        an iterable of row iterables, each written as a CSV record.
+
+    Returns
+    =======
+    None
+    """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)

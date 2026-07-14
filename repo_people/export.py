@@ -15,15 +15,31 @@ BASE = "https://github.com"
 
 def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export all unique commit authors (usernames) for a repository.
+    Export all unique commit authors (usernames) for a repository. Pages through
+    the ``/commits`` endpoint and collects unique ``author.login`` values, so
+    there is no hard cap on the number of results returned. Note that
+    ``export_contributors`` and ``export_commit_authors`` walk the same
+    ``/commits`` endpoint and return equivalent results — they are aliases.
 
-    Pages through /commits and collects unique author.login values, so there is no
-    hard cap on the number of results returned.  Always returns the list of logins;
-    the ``return_data`` parameter is kept for backwards compatibility but is ignored.
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_commit_authors.csv``.
 
-    .. note::
-        ``export_contributors`` and ``export_commit_authors`` walk the same ``/commits``
-        endpoint and return equivalent results.  They are aliases of each other.
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique commit-author login strings.
     """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/commits"
     authors: set = set()
@@ -41,19 +57,33 @@ def export_commit_authors(owner: str, repo: str, token: Optional[str], outdir: s
 
 def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = True, export_csv: bool = False, limit: Optional[int] = None, sleep: float = 1.0) -> List[str]:
     """
-    Scrape and export the list of dependent users (usernames) for a repo.
-
-    Always returns the list of logins; ``return_data`` is kept for backwards
-    compatibility but is ignored.  Stops paginating on the first non-200 response.
+    Scrape and export the list of dependent users (usernames) for a repository
+    from GitHub's HTML dependents page. Stops paginating on the first non-200
+    response and deduplicates dependent repositories before returning.
 
     Parameters
-    ----------
-    limit:
-        Maximum number of unique dependent repositories to collect before stopping.
-        ``None`` (default) collects all pages.  Pass ``0`` for an empty result.
-    sleep:
-        Sleep interval (seconds) between successful page requests, to stay polite
-        to GitHub's HTML endpoint.
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_dependents.csv``.
+    :limit: int/None (default=None)
+        maximum number of unique dependent repositories to collect before
+        stopping. None collects all pages; 0 returns an empty result.
+    :sleep: float (default=1.0)
+        sleep interval, in seconds, between successful page requests to stay
+        polite to GitHub's HTML endpoint.
+
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique dependent-owner login strings.
     """
     url = f"{BASE}/{owner}/{repo}/network/dependents?dependent_type=REPOSITORY"
     session = requests.Session()
@@ -120,15 +150,30 @@ def export_dependents(owner: str, repo: str, outdir: str, return_data: bool = Tr
 
 def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export all unique contributors (usernames) for a repository.
+    Export all unique contributors (usernames) for a repository. Bypasses the
+    ``/contributors`` endpoint's hard 100-item cap by paging through ``/commits``
+    and collecting unique ``author.login`` values — the same commit-walk used by
+    ``export_commit_authors``, of which this is an alias.
 
-    Bypasses the /contributors endpoint's hard 100-item cap by paging through /commits
-    and collecting unique author.login values — the same commit-walk approach used by
-    ``export_commit_authors``.  Both functions return equivalent sets of usernames and
-    are aliases of each other.
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_contributors.csv``.
 
-    Always returns the list of logins; ``return_data`` is kept for backwards compatibility
-    but is ignored.
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique contributor login strings.
     """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/commits"
     authors: set = set()
@@ -145,7 +190,26 @@ def export_contributors(owner: str, repo: str, token: Optional[str], outdir: str
 
 
 def fetch_codeowners(owner: str, repo: str, token: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    
+    """
+    Fetch a repository's CODEOWNERS file, checking each of the locations GitHub
+    recognises (``.github/CODEOWNERS``, ``docs/CODEOWNERS``, ``CODEOWNERS``) and
+    returning the first one found.
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+
+    Returns
+    =======
+    :(path, text): tuple
+        tuple of the repository path where the CODEOWNERS file was found and its
+        decoded text contents, or ``(None, None)`` if no CODEOWNERS file exists.
+    """
     candidates = [".github/CODEOWNERS", "docs/CODEOWNERS", "CODEOWNERS"]
     for path in candidates:
         url = f"{API_BASE_URL}/repos/{owner}/{repo}/contents/{path}"
@@ -159,6 +223,21 @@ def fetch_codeowners(owner: str, repo: str, token: Optional[str]) -> Tuple[Optio
 
 
 def parse_codeowners_owners(text: str) -> List[str]:
+    """
+    Parse the @-mentioned owners out of the raw text of a CODEOWNERS file,
+    ignoring blank lines and comments and stripping the leading ``@`` from each
+    owner or team handle.
+
+    Parameters
+    ==========
+    :text: str
+        the raw text contents of a CODEOWNERS file.
+
+    Returns
+    =======
+    :owners: list
+        sorted list of unique owner/team handles (without the leading ``@``).
+    """
     owners = set()
     for line in text.splitlines():
         line = line.strip()
@@ -175,6 +254,36 @@ def parse_codeowners_owners(text: str) -> List[str]:
 
 
 def export_stargazers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
+    """
+    Export the usernames of all users who have starred a repository, paging
+    through the ``/stargazers`` endpoint.
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_stargazers.csv``.
+
+    Returns
+    =======
+    :usernames: list
+        list of stargazer login strings (empty if unauthenticated and the API
+        returns 401).
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        For HTTP errors other than an unauthenticated 401 when no token is set.
+    """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/stargazers"
     usernames = []
     try:
@@ -194,6 +303,36 @@ def export_stargazers(owner: str, repo: str, token: Optional[str], outdir: str, 
 
 
 def export_watchers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
+    """
+    Export the usernames of all users watching (subscribed to) a repository,
+    paging through the ``/subscribers`` endpoint.
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_watchers.csv``.
+
+    Returns
+    =======
+    :usernames: list
+        list of watcher login strings (empty if unauthenticated and the API
+        returns 401).
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        For HTTP errors other than an unauthenticated 401 when no token is set.
+    """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/subscribers"
     usernames = []
     try:
@@ -212,6 +351,36 @@ def export_watchers(owner: str, repo: str, token: Optional[str], outdir: str, re
 
 
 def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
+    """
+    Export the unique usernames of all issue authors for a repository, paging
+    through the ``/issues`` endpoint in all states (open and closed).
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_issue_authors.csv``.
+
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique issue-author login strings (empty if
+        unauthenticated and the API returns 401).
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        For HTTP errors other than an unauthenticated 401 when no token is set.
+    """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/issues"
     usernames = set()
     try:
@@ -232,6 +401,36 @@ def export_issue_authors(owner: str, repo: str, token: Optional[str], outdir: st
 
 
 def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
+    """
+    Export the unique usernames of all pull-request authors for a repository,
+    paging through the ``/pulls`` endpoint in all states (open and closed).
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_pr_authors.csv``.
+
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique PR-author login strings (empty if unauthenticated
+        and the API returns 401).
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        For HTTP errors other than an unauthenticated 401 when no token is set.
+    """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls"
     usernames = set()
     try:
@@ -252,13 +451,40 @@ def export_pr_authors(owner: str, repo: str, token: Optional[str], outdir: str, 
 
 def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str, skip_codeowners: bool, skip_collaborators: bool, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export maintainers for a repository to CSV and/or return as list.
+    Export the maintainers of a repository, collected from two sources (either
+    of which can be skipped): @-mentions parsed from the CODEOWNERS file, and
+    users with admin, maintain or push permission from the collaborators API.
+    Results are deduplicated by login/team name across both sources.
 
-    Collects maintainers from two sources (both can be toggled off):
-      - CODEOWNERS file: parses @-mentions from .github/CODEOWNERS, docs/CODEOWNERS, or CODEOWNERS.
-      - Collaborators API: includes users with admin, maintain, or push permissions.
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :skip_codeowners: bool
+        when True, do not read maintainers from the CODEOWNERS file.
+    :skip_collaborators: bool
+        when True, do not read maintainers from the collaborators API.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_maintainers.csv``.
 
-    Deduplicates across both sources before returning.
+    Returns
+    =======
+    :usernames: list
+        deduplicated list of maintainer login/team names.
+
+    Raises
+    ======
+    requests.exceptions.HTTPError:
+        For collaborator HTTP errors other than an unauthenticated 401 when no
+        token is set.
     """
     rows = []
     if not skip_codeowners:
@@ -308,7 +534,29 @@ def export_maintainers(owner: str, repo: str, token: Optional[str], outdir: str,
 
 def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = None, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export the owners of all forks for a repository to CSV and/or return as list.
+    Export the owners of every fork of a repository, paging through the
+    ``/forks`` endpoint.
+
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None (default=None)
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str/None (default=None)
+        output directory used when writing the CSV file; required for CSV export.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True (and ``outdir`` is set), also write the usernames to
+        ``<owner>_<repo>_fork_owners.csv``.
+
+    Returns
+    =======
+    :usernames: list
+        list of fork-owner login strings.
     """
     url = f"{API_BASE_URL}/repos/{owner}/{repo}/forks"
     usernames = []
@@ -324,15 +572,30 @@ def export_fork_owners(owner: str, repo: str, token: str = None, outdir: str = N
 
 def export_pr_reviewers(owner: str, repo: str, token: Optional[str], outdir: str, return_data: bool = True, export_csv: bool = False) -> List[str]:
     """
-    Export all unique PR reviewer usernames for a repository.
+    Export the unique usernames of everyone who has reviewed a pull request in a
+    repository. Pages through all open and closed PRs and then fetches the review
+    list for each PR, so this makes one extra API call per PR and can be slow on
+    repositories with many pull requests.
 
-    Pages through all open and closed PRs, then fetches the review list for
-    each PR to collect unique reviewer logins.  This requires one API call per
-    PR in addition to the initial PR listing, so it can be slow on repos with
-    many pull requests.
+    Parameters
+    ==========
+    :owner: str
+        GitHub repository owner (user or organisation).
+    :repo: str
+        GitHub repository name.
+    :token: str/None
+        GitHub personal access token for authenticated requests, or None.
+    :outdir: str
+        output directory used when writing the CSV file.
+    :return_data: bool (default=True)
+        kept for backwards compatibility and ignored; the list is always returned.
+    :export_csv: bool (default=False)
+        when True, also write the usernames to ``<owner>_<repo>_pr_reviewers.csv``.
 
-    Always returns the list of logins; ``return_data`` is kept for backwards
-    compatibility but is ignored.
+    Returns
+    =======
+    :usernames: list
+        sorted list of unique PR-reviewer login strings.
     """
     prs_url = f"{API_BASE_URL}/repos/{owner}/{repo}/pulls"
     pr_numbers: List[int] = []
@@ -354,4 +617,3 @@ def export_pr_reviewers(owner: str, repo: str, token: Optional[str], outdir: str
     if export_csv:
         write_csv(os.path.join(outdir, f"{owner}_{repo}_pr_reviewers.csv"), ["login"], [[u] for u in usernames])
     return usernames
-

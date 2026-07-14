@@ -42,6 +42,16 @@ class UserDataView(dict):
 
     @classmethod
     def _get_valid_fields(cls) -> frozenset:
+        """
+        Return the set of profile field names that may be accessed via dot
+        notation on a :class:`UserDataView`, derived once (and then cached) from
+        the fields of :class:`~repo_people.users.UserSnapshot` plus ``"roles"``.
+
+        Returns
+        =======
+        :_valid_fields: frozenset
+            frozenset of valid user-profile field names.
+        """
         if cls._valid_fields is None:
             from .users import UserSnapshot
             cls._valid_fields = frozenset(
@@ -51,10 +61,37 @@ class UserDataView(dict):
 
     @classmethod
     def _clear_valid_fields_cache(cls) -> None:
-        """Reset the cached valid-fields set (useful in tests that patch UserSnapshot)."""
+        """
+        Reset the cached set of valid profile fields so it is recomputed on next
+        access. Useful in tests that patch :class:`UserSnapshot`.
+
+        Returns
+        =======
+        None
+        """
         cls._valid_fields = None
 
     def __getattr__(self, name: str):
+        """
+        Support dot-notation access to a single profile field across every
+        collected user. For a valid field name, returns a dict mapping each
+        username to a one-key record containing that field's value.
+
+        Parameters
+        ==========
+        :name: str
+            the profile field name being accessed as an attribute.
+
+        Returns
+        =======
+        :field_view: dict
+            dict of ``{username: {name: value}}`` for the requested field.
+
+        Raises
+        ======
+        AttributeError:
+            When *name* is a private/dunder name or not a valid profile field.
+        """
         # Avoid intercepting dunder/private names (prevents pickle/copy issues)
         if name.startswith("_"):
             raise AttributeError(name)
@@ -93,6 +130,34 @@ class RepoPeople:
         skip_codeowners: bool = False,
         skip_collaborators: bool = False,
     ):
+        """
+        Initialise a :class:`RepoPeople` instance for a single GitHub repository,
+        validating the owner/repo names, warning when no token is supplied
+        (unauthenticated requests are capped at 60/hour), creating the PyGithub
+        client and verifying the connection before any collection begins.
+
+        Parameters
+        ==========
+        :owner: str
+            GitHub repository owner (user or organisation).
+        :repo: str
+            GitHub repository name.
+        :token: str/None (default=None)
+            GitHub personal access token; None runs unauthenticated with a warning.
+        :outdir: str/None (default=None)
+            output directory for exported files; defaults to ``"outputs"``.
+        :skip_codeowners: bool (default=False)
+            when True, skip the CODEOWNERS file when collecting maintainers.
+        :skip_collaborators: bool (default=False)
+            when True, skip the collaborators API when collecting maintainers.
+
+        Raises
+        ======
+        ValueError:
+            When the owner or repo name is invalid.
+        ConnectionError:
+            When the GitHub connection/token check fails.
+        """
         validate_owner_repo(owner, repo)
         self.owner = owner
         self.repo = repo
@@ -124,17 +189,49 @@ class RepoPeople:
 
     @property
     def token(self) -> Optional[str]:
-        """GitHub personal access token (private; store via constructor only)."""
+        """
+        Return the GitHub personal access token for this instance. Stored
+        privately and settable only via the constructor to reduce accidental
+        exposure in ``repr()`` or logs.
+
+        Returns
+        =======
+        :_token: str/None
+            the personal access token, or None if running unauthenticated.
+        """
         return self._token
 
     def __repr__(self) -> str:
+        """
+        Return an unambiguous string representation of the instance for
+        debugging. The token is deliberately omitted.
+
+        Returns
+        =======
+        :repr: str
+            representation showing owner, repo, output directory and role count.
+        """
         return (
             f"RepoPeople(owner={self.owner!r}, repo={self.repo!r}, "
             f"outdir={self.outdir!r}, valid_roles={len(self.VALID_ROLES)})"
         )
 
     def _print_rate_limit_status(self, context: str = "") -> None:
-        """Print the current GitHub rate-limit window when available."""
+        """
+        Print the current GitHub rate-limit window (remaining/total requests and
+        minutes until reset) when the information is available, prefixed with an
+        optional context label. Silently does nothing if the readout is
+        unavailable.
+
+        Parameters
+        ==========
+        :context: str (default="")
+            optional label printed before the rate-limit line (e.g. "Preflight").
+
+        Returns
+        =======
+        None
+        """
         try:
             remaining, total_limit = self.gh.rate_limiting
             reset_epoch = self.gh.rate_limiting_resettime
@@ -164,13 +261,28 @@ class RepoPeople:
         roles: Optional[List[str]] = None,
     ) -> Dict[str, List[str]]:
         """
-        Fetch usernames from each repo role and return them grouped by role.
+        Fetch usernames from each repository role and return them grouped by
+        role. Roles are fetched concurrently, and if a subset of roles is
+        requested only those are collected (avoiding unnecessary API calls).
 
-        Returns a dict with keys: contributors, maintainers, stargazers,
-        watchers, issue_authors, pr_authors, fork_owners, commit_authors,
-        dependents. Each value is a list of GitHub login strings.
+        Parameters
+        ==========
+        :roles: list/None (default=None)
+            list of role names to collect (e.g. ``["contributors", "stargazers"]``).
+            If None, all valid roles are collected.
 
-        If roles is provided, only the specified roles are collected.
+        Returns
+        =======
+        :results: dict
+            dict mapping each requested role name to a list of GitHub login
+            strings. Possible keys: contributors, maintainers, stargazers,
+            watchers, issue_authors, pr_authors, pr_reviewers, fork_owners,
+            commit_authors, dependents.
+
+        Raises
+        ======
+        ValueError:
+            When any requested role is not one of the valid role names.
         """
         # Validate any explicitly requested roles
         if roles is not None:
@@ -218,6 +330,7 @@ class RepoPeople:
         results: Dict[str, List[str]] = {}
 
         def _fetch_role(role: str) -> tuple:
+            """Fetch a single role's usernames, returning ``(role, usernames)``."""
             return role, role_fetchers[role]()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(active_roles), 9)) as executor:
@@ -246,25 +359,42 @@ class RepoPeople:
         workers: int = 1,
     ) -> Dict[str, dict]:
         """
-        Fetch full GitHub profile details for each username via the GitHub API.
+        Fetch full GitHub profile details for each username via the GitHub API,
+        returning a dict keyed by login containing all available user fields
+        (profile info, counters, orgs, computed metrics, etc.). Usernames that
+        cannot be fetched are skipped with a warning.
 
-        Returns a dict keyed by login containing all available user fields
-        (profile info, counters, orgs, computed metrics, etc.).
-        Users that cannot be fetched are skipped with a warning.
+        Parameters
+        ==========
+        :usernames: list
+            list of GitHub logins to fetch.
+        :save_each_iteration: bool (default=False)
+            when True, write ``user_details.json`` after every 10 successful
+            fetches so progress survives interruption (batched to reduce I/O).
+        :limit: int/None (default=None)
+            fetch only the first N usernames. Usernames are sorted alphabetically
+            before the limit is applied, so results are deterministic.
+        :exclude: list/None (default=None)
+            list of logins to skip entirely.
+        :exclude_bots: bool (default=False)
+            when True, skip logins ending in ``[bot]`` or ``-bot`` and profiles
+            flagged as bots.
+        :resume: bool (default=False)
+            when True, load any existing ``user_details.json`` and skip logins
+            already present in it.
+        :verbose: bool (default=True)
+            when False, suppress per-user fetch messages.
+        :include_social_accounts: bool (default=False)
+            when True, make an extra REST call per user to fetch linked social
+            accounts (LinkedIn, Mastodon, YouTube, npm, etc.).
+        :workers: int (default=1)
+            number of concurrent fetch threads (1 = sequential). Capped at 32,
+            with a warning, if a higher value is passed.
 
-        If save_each_iteration is True, user_details.json is updated after every
-        10 successful fetches so progress is preserved if the process is interrupted
-        (batched to reduce I/O overhead).
-        If limit is set, only the first N usernames are fetched.  Note: usernames are
-        sorted alphabetically before any limit is applied, so results are deterministic.
-        If exclude is provided, those logins are skipped.
-        If exclude_bots is True, logins ending in '[bot]' or '-bot' are skipped.
-        If resume is True, any logins already present in user_details.json are skipped.
-        If verbose is False, per-user fetch messages are suppressed.
-        If include_social_accounts is True, an extra REST call fetches each user's
-        linked social accounts (LinkedIn, Mastodon, YouTube, npm, etc.).
-        workers controls the number of concurrent fetches (default 1 = sequential).
-        Maximum supported value is 32; higher values are capped with a warning.
+        Returns
+        =======
+        :user_data: dict
+            dict keyed by GitHub login containing each user's full profile data.
         """
         save_path = os.path.join(self.outdir, f"{self.file_prefix}user_details.json")
 
@@ -316,6 +446,7 @@ class RepoPeople:
         rate_client = {"gh": self.gh}  # most-recently-created client, for the rate readout
 
         def _client() -> Github:
+            """Return the GitHub client for the current thread (shared when single-worker)."""
             if _use_shared:
                 return self.gh
             gh = getattr(_tl, "gh", None)
@@ -326,6 +457,7 @@ class RepoPeople:
             return gh
 
         def _fetch_one(login: str) -> dict:
+            """Fetch and return one user's profile dict for the given login."""
             if verbose:
                 print(f"  Fetching: {login}")
             info = GitHubUserInfo(_client(), username=login)
@@ -392,15 +524,26 @@ class RepoPeople:
         filename: Optional[str] = None,
         lines: bool = False,
     ) -> str:
-        """Write user data dict to a JSON file in outdir. Returns the output path.
+        """
+        Write the user-data dict to a JSON file inside the output directory and
+        return the path written.
 
         Parameters
-        ----------
-        lines:
-            When ``True``, writes one JSON object per line (JSON Lines / JSONL format)
-            instead of a single pretty-printed JSON object.  Useful for streaming
-            large datasets to downstream tools.  The output filename will end in
-            ``.jsonl`` instead of ``.json`` unless *filename* is explicitly set.
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to serialise.
+        :filename: str/None (default=None)
+            output filename; defaults to ``<owner>_<repo>_user_details.json``
+            (or ``.jsonl`` when *lines* is True).
+        :lines: bool (default=False)
+            when True, write one JSON object per line (JSON Lines / JSONL format)
+            instead of a single pretty-printed object, for streaming to
+            downstream tools.
+
+        Returns
+        =======
+        :path: str
+            the path of the JSON file written.
         """
         if lines and filename is None:
             filename = f"{self.file_prefix}user_details.jsonl"
@@ -422,10 +565,23 @@ class RepoPeople:
         filename: Optional[str] = None,
     ) -> str:
         """
-        Write flattened user data to a CSV file in outdir.
+        Write flattened user data to a CSV file inside the output directory.
+        Column names are the union of keys across all records (so records that
+        differ, e.g. after a resume merge or field filtering, are not truncated),
+        and list/tuple fields are serialised as semicolon-separated strings.
 
-        List/tuple fields are serialised as semicolon-separated strings.
-        Returns the output path, or an empty string if user_data is empty.
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to serialise.
+        :filename: str/None (default=None)
+            output filename; defaults to ``<owner>_<repo>_user_details.csv``.
+
+        Returns
+        =======
+        :path: str
+            the path of the CSV file written, or an empty string if *user_data*
+            is empty.
         """
         if not user_data:
             return ""
@@ -460,12 +616,27 @@ class RepoPeople:
         filename: Optional[str] = None,
     ) -> str:
         """
-        Write user data to an Excel (.xlsx) file in outdir.
-
+        Write user data to an Excel (.xlsx) file inside the output directory.
         List/tuple fields are serialised as semicolon-separated strings.
-        Returns the output path, or an empty string if user_data is empty.
-        Requires ``openpyxl``: install with ``pip install openpyxl`` or
-        ``pip install repo-people[excel]``.
+
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to serialise.
+        :filename: str/None (default=None)
+            output filename; defaults to ``<owner>_<repo>_user_details.xlsx``.
+
+        Returns
+        =======
+        :path: str
+            the path of the .xlsx file written, or an empty string if *user_data*
+            is empty.
+
+        Raises
+        ======
+        ImportError:
+            When ``openpyxl`` is not installed (``pip install openpyxl`` or
+            ``pip install repo-people[excel]``).
         """
         if not user_data:
             return ""
@@ -508,10 +679,23 @@ class RepoPeople:
         fields: Optional[List[str]] = None,
     ) -> str:
         """
-        Write user data as a Markdown table to a file in outdir.
+        Write user data as a Markdown table to a file inside the output
+        directory, escaping pipe characters within cell values.
 
-        Defaults to a concise set of columns; pass fields to override.
-        Returns the output path, or an empty string if user_data is empty.
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to render.
+        :filename: str/None (default=None)
+            output filename; defaults to ``<owner>_<repo>_user_details.md``.
+        :fields: list/None (default=None)
+            columns to include; defaults to a concise summary set of columns.
+
+        Returns
+        =======
+        :path: str
+            the path of the Markdown file written, or an empty string if
+            *user_data* is empty.
         """
         if not user_data:
             return ""
@@ -537,11 +721,20 @@ class RepoPeople:
         fields: Optional[List[str]] = None,
     ) -> None:
         """
-        Print a Markdown table of user data to stdout.
+        Print a Markdown table of user data to stdout, using the same table
+        format as :meth:`export_to_markdown` but writing to the terminal instead
+        of a file. Useful for quick inspection in a terminal or notebook.
 
-        Produces the same table format as :meth:`export_to_markdown` but
-        writes to stdout instead of a file. Useful for quick inspection in a
-        terminal or notebook. Does nothing when user_data is empty.
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to render.
+        :fields: list/None (default=None)
+            columns to include; defaults to a concise summary set of columns.
+
+        Returns
+        =======
+        None
         """
         if not user_data:
             return
@@ -559,11 +752,22 @@ class RepoPeople:
 
     def summarise(self, user_data: Dict[str, dict], top_n: int = 5) -> dict:
         """
-        Print and return a summary breakdown of the fetched user data.
+        Print and return a summary breakdown of the fetched user data, covering
+        total users, the bot vs human split, top locations, top companies,
+        account-age distribution (by band) and role distribution.
 
-        Covers: total users, bot vs human split, top locations, top companies,
-        and account age distribution (by quartile).
-        Pass top_n to control how many top locations/companies are shown.
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to summarise.
+        :top_n: int (default=5)
+            how many of the top locations and companies to include.
+
+        Returns
+        =======
+        :summary: dict
+            dict of the computed summary statistics, or an empty dict when
+            *user_data* is empty.
         """
         users = list(user_data.values())
         total = len(users)
@@ -594,6 +798,7 @@ class RepoPeople:
             [u.get("account_age_days", 0) for u in users if isinstance(u.get("account_age_days"), (int, float))]
         )
         def _band(days: int) -> str:
+            """Map an account age in days to a human-readable age band label."""
             if days < 365:   return "< 1 year"
             if days < 1825:  return "1–5 years"
             if days < 3650:  return "5–10 years"
@@ -645,11 +850,24 @@ class RepoPeople:
         by: str = "followers",
     ) -> List[dict]:
         """
-        Return the top N users ranked by a numeric profile field.
+        Return the top N users ranked in descending order by a numeric profile
+        field. Users missing the field are treated as 0 and ranked last.
 
-        Common values for 'by': followers, public_repos, account_age_days,
-        following, public_gists, total_public_stars_sampled.
-        Users missing the field are ranked last.
+        Parameters
+        ==========
+        :user_data: dict
+            dict of user records keyed by login to rank.
+        :n: int (default=10)
+            number of top users to return.
+        :by: str (default="followers")
+            numeric profile field to rank by (e.g. followers, public_repos,
+            account_age_days, following, public_gists,
+            total_public_stars_sampled).
+
+        Returns
+        =======
+        :ranked: list
+            list of the top N user record dicts, highest first.
         """
         ranked = sorted(
             user_data.values(),
@@ -665,13 +883,25 @@ class RepoPeople:
         user_data_other: Dict[str, dict],
     ) -> Dict[str, object]:
         """
-        Compare user populations between this repo and another ``RepoPeople`` instance.
+        Compare the user populations of this repository and another
+        ``RepoPeople`` instance, reporting who is unique to each and who appears
+        in both.
 
-        Returns a dict with three keys:
+        Parameters
+        ==========
+        :other: RepoPeople
+            the other ``RepoPeople`` instance to compare against.
+        :user_data_self: dict
+            user-data dict collected for this repository.
+        :user_data_other: dict
+            user-data dict collected for the *other* repository.
 
-        - ``"only_in_self"``  — logins present in this repo but not the other.
-        - ``"only_in_other"`` — logins present in the other repo but not this one.
-        - ``"in_both"``       — logins that appear in both repos.
+        Returns
+        =======
+        :comparison: dict
+            dict with keys ``"only_in_self"`` (logins here but not in the other),
+            ``"only_in_other"`` (logins in the other but not here) and
+            ``"in_both"`` (logins in both), each a sorted list.
 
         Example::
 
@@ -696,17 +926,23 @@ class RepoPeople:
         new: "Union[Dict[str, dict], str]",
     ) -> "Dict[str, List[str]]":
         """
-        Compare two user-data snapshots and return who joined and who left.
+        Compare two user-data snapshots and report who joined, who left and who
+        is unchanged between them. Each argument may be either a ``dict`` (as
+        returned by :meth:`get_users`) or a path to a JSON file previously
+        written by :meth:`export_to_json`.
 
-        Each argument can be either a ``dict`` (as returned by :meth:`get_users`)
-        or a file-system path to a JSON file previously written by
-        :meth:`export_to_json`.
+        Parameters
+        ==========
+        :old: dict/str
+            the earlier snapshot, as a user-data dict or a path to a JSON file.
+        :new: dict/str
+            the later snapshot, as a user-data dict or a path to a JSON file.
 
-        Returns a dict with three keys:
-
-        - ``"joined"``    — logins present in *new* but not in *old*.
-        - ``"left"``      — logins present in *old* but not in *new*.
-        - ``"unchanged"`` — logins present in both snapshots.
+        Returns
+        =======
+        :diff: dict
+            dict with keys ``"joined"`` (in *new* but not *old*), ``"left"`` (in
+            *old* but not *new*) and ``"unchanged"`` (in both), each a sorted list.
 
         Example::
 
@@ -746,36 +982,53 @@ class RepoPeople:
         workers: int = 1,
     ) -> UserDataView:
         """
-        Full pipeline: collect all repo usernames -> fetch user details -> export.
+        Run the full pipeline for a repository: collect usernames from every
+        requested role, deduplicate across roles, fetch each unique user's full
+        GitHub profile, and optionally export the results. Each returned record
+        always includes a ``"roles"`` key listing the role(s) the user appeared
+        under, regardless of the *fields* parameter.
 
-        Steps:
-            1. Collect usernames from every repo role (contributors, stargazers, ...).
-            2. Deduplicate across all roles.
-            3. Fetch the full GitHub profile for each unique user.
-            4. Optionally export to user_details.json / user_details.csv inside outdir.
+        Parameters
+        ==========
+        :export: bool (default=False)
+            when True, save results to ``user_details.json``.
+        :export_csv: bool (default=False)
+            when True, save results to ``user_details.csv``.
+        :export_xlsx: bool (default=False)
+            when True, save results to ``user_details.xlsx`` (requires openpyxl).
+        :save_each_iteration: bool (default=False)
+            when True, write ``user_details.json`` after successful fetches.
+        :limit: int/None (default=None)
+            stop after fetching this many user profiles.
+        :roles: list/None (default=None)
+            only collect users from these role categories (e.g.
+            ``["contributors", "stargazers"]``); None collects all roles.
+        :exclude: list/None (default=None)
+            list of logins to skip entirely.
+        :exclude_bots: bool (default=False)
+            skip logins ending in ``[bot]`` and profiles with ``is_bot=True``.
+        :resume: bool (default=False)
+            load existing ``user_details.json`` and skip already-fetched users.
+        :verbose: bool (default=True)
+            print a line for each user being fetched.
+        :fields: list/None (default=None)
+            if set, keep only these attributes per user in the output (e.g.
+            ``["login", "type", "updated_at"]``).
+        :include_social_accounts: bool (default=False)
+            fetch each user's linked social accounts (LinkedIn, Mastodon,
+            YouTube, npm, …). Costs one extra API call per user.
+        :workers: int (default=1)
+            number of concurrent fetch threads (1 = sequential).
 
-        Parameters:
-            export            -- save results to user_details.json when True.
-            export_csv        -- save results to user_details.csv when True.
-            export_xlsx       -- save results to user_details.xlsx when True (requires openpyxl).
-            save_each_iteration -- write user_details.json after every successful fetch.
-            limit             -- stop after fetching this many user profiles.
-            roles             -- only collect users from these role categories
-                                 (e.g. ["contributors", "stargazers"]).
-            exclude           -- list of logins to skip entirely.
-            exclude_bots      -- skip logins ending in '[bot]' and profiles with is_bot=True.
-            resume            -- load existing user_details.json and skip already-fetched users.
-            verbose           -- print a line for each user being fetched.
-            fields            -- if set, only these attributes are kept per user in the output
-                                 (e.g. ["login", "type", "updated_at"]).
-            include_social_accounts -- fetch each user's linked social accounts
-                                 (LinkedIn, Mastodon, YouTube, npm, …). Costs one extra
-                                 API call per user.
-            workers           -- number of concurrent fetch threads (default 1 = sequential).
+        Returns
+        =======
+        :user_data: UserDataView
+            dict-like view keyed by GitHub login with full user profile data.
 
-        Returns a dict keyed by GitHub login with full user profile data.
-        Each record always includes a "roles" key listing the role(s) the user
-        appeared under, regardless of the fields parameter.
+        Raises
+        ======
+        ValueError:
+            When any requested field or role name is invalid.
         """
         # Validate fields against UserSnapshot before any network calls
         if fields is not None:
@@ -878,23 +1131,34 @@ class RepoPeople:
         concurrency: int = 10,
     ) -> Dict[str, dict]:
         """
-        Async version of get_user_details using aiohttp.
+        Async version of :meth:`get_user_details` using aiohttp. Fetches raw
+        user profiles directly from the GitHub REST API (``GET /users/{login}``),
+        using an ``asyncio.Semaphore`` to cap simultaneous connections, and
+        assembles records matching the sync path's field set.
 
-        Fetches raw user profiles directly from the GitHub REST API
-        (GET /users/{login}) using an asyncio.Semaphore to cap simultaneous
-        connections. Supports the same filtering params as the sync path.
+        Parameters
+        ==========
+        :usernames: list
+            list of GitHub logins to fetch.
+        :save_each_iteration: bool (default=False)
+            when True, persist ``user_details.json`` after each fetch.
+        :limit: int/None (default=None)
+            cap the number of profiles fetched.
+        :exclude: list/None (default=None)
+            list of logins to skip.
+        :exclude_bots: bool (default=False)
+            skip logins ending in ``[bot]`` and profiles flagged as bots.
+        :resume: bool (default=False)
+            skip logins already present in ``user_details.json``.
+        :verbose: bool (default=True)
+            print a line per fetched user.
+        :concurrency: int (default=10)
+            maximum number of simultaneous aiohttp requests.
 
-        Parameters:
-            usernames         -- list of GitHub logins to fetch.
-            save_each_iteration -- persist user_details.json after each fetch.
-            limit             -- cap the number of profiles fetched.
-            exclude           -- logins to skip.
-            exclude_bots      -- skip logins ending in '[bot]'.
-            resume            -- skip logins already in user_details.json.
-            verbose           -- print a line per fetched user.
-            concurrency       -- max simultaneous aiohttp requests (default 10).
-
-        Returns a dict keyed by login with profile data dicts.
+        Returns
+        =======
+        :user_data: dict
+            dict keyed by GitHub login with profile-data dicts.
         """
         import aiohttp
         import asyncio
@@ -938,12 +1202,14 @@ class RepoPeople:
         lock = asyncio.Lock()
 
         async def _fetch_one(session: aiohttp.ClientSession, login: str) -> None:
+            """Fetch one user's profile via aiohttp and store it in ``user_data``."""
             async with sem:
                 if verbose:
                     print(f"  Fetching: {login}")
 
                 # Helper: GET a URL and return parsed JSON, or None on non-200
                 async def _get_json(url: str, params=None):
+                    """GET a URL and return parsed JSON, or None on a non-200 response."""
                     async with session.get(url, headers=headers, params=params) as r:
                         return await r.json() if r.status == 200 else None
 
@@ -1103,27 +1369,46 @@ class RepoPeople:
         concurrency: int = 10,
     ) -> UserDataView:
         """
-        Async version of get_users.
+        Async version of :meth:`get_users`. Collects usernames synchronously
+        (exactly as :meth:`get_users`), then fetches all profiles concurrently
+        via aiohttp. Accepts the same parameters as :meth:`get_users`, except
+        that *workers* is replaced by *concurrency*. Every returned record
+        includes a ``"roles"`` key.
 
-        Collects usernames synchronously (same as get_users), then fetches
-        all profiles concurrently via aiohttp. Accepts the same parameters as
-        get_users except workers is replaced by concurrency.
+        Parameters
+        ==========
+        :export: bool (default=False)
+            when True, save results to ``user_details.json``.
+        :export_csv: bool (default=False)
+            when True, save results to ``user_details.csv``.
+        :save_each_iteration: bool (default=False)
+            when True, persist after every fetch.
+        :limit: int/None (default=None)
+            cap the number of profiles fetched.
+        :roles: list/None (default=None)
+            restrict which role categories are collected; None collects all.
+        :exclude: list/None (default=None)
+            list of logins to skip entirely.
+        :exclude_bots: bool (default=False)
+            skip bot accounts.
+        :resume: bool (default=False)
+            skip logins already present in ``user_details.json``.
+        :verbose: bool (default=True)
+            print per-user progress.
+        :fields: list/None (default=None)
+            restrict which fields appear in the output dict.
+        :concurrency: int (default=10)
+            maximum number of simultaneous aiohttp connections.
 
-        Parameters:
-            export            -- save results to user_details.json.
-            export_csv        -- save results to user_details.csv.
-            save_each_iteration -- persist after every fetch.
-            limit             -- cap the number of profiles fetched.
-            roles             -- restrict which role categories are collected.
-            exclude           -- logins to skip entirely.
-            exclude_bots      -- skip bot accounts.
-            resume            -- skip logins already in user_details.json.
-            verbose           -- print per-user progress.
-            fields            -- restrict which fields appear in the output dict.
-            concurrency       -- max simultaneous aiohttp connections (default 10).
+        Returns
+        =======
+        :user_data: UserDataView
+            dict-like view keyed by GitHub login with profile data.
 
-        Returns a dict keyed by GitHub login with profile data, including a
-        'roles' key on every record.
+        Raises
+        ======
+        ValueError:
+            When any requested field or role name is invalid.
         """
         # Validate fields before any network calls
         if fields is not None:

@@ -99,6 +99,7 @@ pip3 install .
 - [Read the Docs](https://repo-people.readthedocs.io/en/latest/) — full package documentation
 - [FIELDS.md](FIELDS.md) — full reference table of all 48 output fields with descriptions
 - [CHANGELOG.md](CHANGELOG.md) — version history and release notes
+- [Deep Wiki](DeepWiki) - structured wiki of repo using DeepWiki
 
 ---
 
@@ -349,3 +350,4 @@ Distributed under the MIT License. See [`LICENSE`][license] for more details.
 [PyPi]: https://pypi.org/project/repo-people
 [Issues]: https://github.com/amckenna41/repo-people/issues
 [license]: https://github.com/amckenna41/repo-people/blob/master/LICENSE
+[DeepWiki]: https://deepwiki.com/amckenna41/repo-people

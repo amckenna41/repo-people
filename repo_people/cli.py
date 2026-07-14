@@ -20,6 +20,16 @@ from repo_people import RepoPeople
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """
+    Build and configure the command-line argument parser for repo-people,
+    registering the positional owner/repo arguments and every optional flag
+    (token, output directory, roles, export formats, limits, workers, etc.).
+
+    Returns
+    =======
+    :parser: argparse.ArgumentParser
+        the fully configured argument parser for the repo-people CLI.
+    """
     parser = argparse.ArgumentParser(
         prog="repo-people",
         description=(
@@ -113,6 +123,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> None:
+    """
+    Entry point for the repo-people command-line interface. Parses the CLI
+    arguments, resolves the GitHub token (falling back to the ``GITHUB_TOKEN``
+    environment variable), instantiates :class:`RepoPeople`, runs the user
+    collection pipeline and prints a summary of how many users were collected.
+
+    Parameters
+    ==========
+    :argv: list/None (default=None)
+        argument list to parse. If None, ``sys.argv`` is used (the normal case
+        when invoked from the shell); an explicit list is mainly useful in tests.
+
+    Returns
+    =======
+    None
+
+    Raises
+    ======
+    SystemExit:
+        With exit code 1 when constructing the client or collecting users fails
+        with a ValueError or ConnectionError.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 

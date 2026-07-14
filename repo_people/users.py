@@ -89,9 +89,32 @@ class GitHubUserInfo:
     all attributes as a dataclass.
     """
     def __init__(self, gh: Optional[Github] = None, username: Optional[str] = None, user_obj: Optional[NamedUser] = None, token: Optional[str] = None):
+        """
+        Initialise a wrapper for a single GitHub user, either by username or by
+        an existing PyGithub ``NamedUser`` object. A GitHub client is reused if
+        supplied, otherwise one is created (authenticated when a token is given).
+
+        Parameters
+        ==========
+        :gh: Github/None (default=None)
+            an existing PyGithub client to reuse; if None a new one is created.
+        :username: str/None (default=None)
+            the GitHub login to wrap. Required if *user_obj* is not given.
+        :user_obj: NamedUser/None (default=None)
+            an already-fetched PyGithub user object. Required if *username* is
+            not given.
+        :token: str/None (default=None)
+            personal access token used only when *gh* is None, to build an
+            authenticated client.
+
+        Raises
+        ======
+        ValueError:
+            When neither *username* nor *user_obj* is provided.
+        """
         if not (username or user_obj):
             raise ValueError("Provide either username or user_obj")
-        
+
         # Create GitHub client if not provided
         if gh is None:
             if token:
@@ -100,13 +123,23 @@ class GitHubUserInfo:
                 self._gh = Github()
         else:
             self._gh = gh
-        
+
         self._user_obj: Optional[NamedUser] = user_obj
         self._username = username or (user_obj.login if user_obj else None)
         self._cache: Dict[str, Any] = {}
 
     # ---------- internal helpers ----------
     def _user(self) -> NamedUser:
+        """
+        Return the underlying PyGithub ``NamedUser`` object, lazily fetching it
+        from the API on first access. Fetch failures are logged and result in
+        None rather than raising.
+
+        Returns
+        =======
+        :_user_obj: NamedUser/None
+            the resolved user object, or None if it could not be fetched.
+        """
         if self._user_obj is None:
             try:
                 self._user_obj = self._gh.get_user(self._username)
@@ -118,6 +151,23 @@ class GitHubUserInfo:
         return self._user_obj
 
     def _get_basic(self, attr: str, default=None):
+        """
+        Safely read a single attribute from the underlying user object, returning
+        a default instead of raising when the user cannot be fetched, the rate
+        limit is hit, or the object is incomplete.
+
+        Parameters
+        ==========
+        :attr: str
+            the attribute name to read from the PyGithub user object.
+        :default: any (default=None)
+            value returned when the attribute is unavailable or an error occurs.
+
+        Returns
+        =======
+        :result: any
+            the attribute value, or *default* on any failure.
+        """
         try:
             user_obj = self._user()
             if user_obj is None:
@@ -137,13 +187,45 @@ class GitHubUserInfo:
 
     # NEW — small helpers
     def _normalized_company(self) -> str:
+        """
+        Return the user's company string normalised by trimming whitespace and
+        stripping a leading ``@`` (as used in GitHub org handles).
+
+        Returns
+        =======
+        :company: str
+            the normalised company name.
+        """
         c = (self.company or "").strip()
         return c[1:] if c.startswith("@") else c
 
     def _normalized_location(self) -> str:
+        """
+        Return the user's location string normalised to trimmed lower case for
+        easier grouping and comparison.
+
+        Returns
+        =======
+        :location: str
+            the normalised location string.
+        """
         return (self.location or "").strip().lower()
 
     def _days_since(self, iso: str) -> int:
+        """
+        Return the whole number of days between an ISO-8601 timestamp and now
+        (UTC), clamped to a minimum of 0.
+
+        Parameters
+        ==========
+        :iso: str
+            an ISO-8601 timestamp string (a trailing ``Z`` is accepted).
+
+        Returns
+        =======
+        :days: int
+            number of days elapsed, or 0 if *iso* is empty or unparseable.
+        """
         if not iso:
             return 0
         try:
@@ -153,20 +235,62 @@ class GitHubUserInfo:
             return 0
 
     def _followers_following_ratio(self) -> float:
+        """
+        Return the ratio of followers to following. When the user follows nobody,
+        the follower count itself is returned to avoid division by zero.
+
+        Returns
+        =======
+        :ratio: float
+            followers divided by following, rounded to 2 decimal places.
+        """
         f, g = self.followers, self.following
         return float(f) if g == 0 else round(f / g, 2)
 
     def _repos_per_year(self) -> float:
+        """
+        Return the user's average number of public repositories created per year,
+        based on account age (a minimum of one day is used to avoid division by
+        zero on brand-new accounts).
+
+        Returns
+        =======
+        :repos_per_year: float
+            public repos per year, rounded to 2 decimal places.
+        """
         days = max(1, self._days_since(self.created_at))
         years = days / 365.25
         return round(self.public_repos / years, 2) if years else float(self.public_repos)
 
     def _recently_active(self, days: int = 90) -> bool:
+        """
+        Return whether the user has had public activity within the last *days*
+        days, based on their most recent public event.
+
+        Parameters
+        ==========
+        :days: int (default=90)
+            the activity window, in days.
+
+        Returns
+        =======
+        :recently_active: bool
+            True if the last public event falls within the window, else False.
+        """
         return self._days_since(self.last_public_event_at) <= days if self.last_public_event_at else False
 
     # ---------- public lightweight properties (cheap) ----------
     @property
     def login(self) -> str:
+        """
+        Return the user's GitHub login, falling back to the username supplied at
+        construction if the API does not provide one. Cached after first access.
+
+        Returns
+        =======
+        :login: str
+            the user's GitHub username.
+        """
         if "login" not in self._cache:
             # Try to get login from API, but fall back to the username we were given
             api_login = self._get_basic("login", "")
@@ -175,48 +299,117 @@ class GitHubUserInfo:
 
     @property
     def id(self) -> Optional[int]:
+        """
+        Return the user's numeric GitHub ID. Cached after first access.
+
+        Returns
+        =======
+        :id: int/None
+            the user's GitHub ID, or None if unavailable.
+        """
         if "id" not in self._cache:
             self._cache["id"] = self._get_basic("id", None)
         return self._cache["id"]
 
     @property
     def node_id(self) -> str:
+        """
+        Return the user's GraphQL global node ID. Cached after first access.
+
+        Returns
+        =======
+        :node_id: str
+            the user's node ID, or an empty string if unavailable.
+        """
         if "node_id" not in self._cache:
             self._cache["node_id"] = self._get_basic("node_id", "") or ""
         return self._cache["node_id"]
 
     @property
     def type(self) -> str:
+        """
+        Return the user's account type (e.g. ``"User"``, ``"Organization"``,
+        ``"Bot"``). Cached after first access.
+
+        Returns
+        =======
+        :type: str
+            the account type, or an empty string if unavailable.
+        """
         if "type" not in self._cache:
             self._cache["type"] = self._get_basic("type", "") or ""
         return self._cache["type"]
 
     @property
     def name(self) -> str:
+        """
+        Return the user's display name. Cached after first access.
+
+        Returns
+        =======
+        :name: str
+            the display name, or an empty string if unavailable.
+        """
         if "name" not in self._cache:
             self._cache["name"] = self._get_basic("name", "") or ""
         return self._cache["name"]
 
     @property
     def company(self) -> str:
+        """
+        Return the user's company as listed on their profile. Cached after first
+        access.
+
+        Returns
+        =======
+        :company: str
+            the company string, or an empty string if unavailable.
+        """
         if "company" not in self._cache:
             self._cache["company"] = self._get_basic("company", "") or ""
         return self._cache["company"]
 
     @property
     def location(self) -> str:
+        """
+        Return the user's location as listed on their profile. Cached after
+        first access.
+
+        Returns
+        =======
+        :location: str
+            the location string, or an empty string if unavailable.
+        """
         if "location" not in self._cache:
             self._cache["location"] = self._get_basic("location", "") or ""
         return self._cache["location"]
 
     @property
     def email_public(self) -> str:
+        """
+        Return the user's publicly listed email address. Cached after first
+        access.
+
+        Returns
+        =======
+        :email_public: str
+            the public email, or an empty string if unavailable.
+        """
         if "email_public" not in self._cache:
             self._cache["email_public"] = self._get_basic("email", "") or ""
         return self._cache["email_public"]
 
     @property
     def email_domain(self) -> str:
+        """
+        Return the lower-cased domain portion of the user's public email address.
+        Cached after first access.
+
+        Returns
+        =======
+        :email_domain: str
+            the email domain, or an empty string if there is no public email.
+        """
         if "email_domain" not in self._cache:
             try:
                 self._cache["email_domain"] = (self.email_public or "").split("@", 1)[1].lower()
@@ -226,54 +419,133 @@ class GitHubUserInfo:
 
     @property
     def blog(self) -> str:
+        """
+        Return the user's blog/website URL as listed on their profile. Cached
+        after first access.
+
+        Returns
+        =======
+        :blog: str
+            the blog URL, or an empty string if unavailable.
+        """
         if "blog" not in self._cache:
             self._cache["blog"] = self._get_basic("blog", "") or ""
         return self._cache["blog"]
 
     @property
     def blog_host(self) -> str:
+        """
+        Return the lower-cased host portion of the user's blog URL. Cached after
+        first access.
+
+        Returns
+        =======
+        :blog_host: str
+            the blog hostname, or an empty string if there is no blog URL.
+        """
         if "blog_host" not in self._cache:
             self._cache["blog_host"] = (urlparse(self.blog).hostname or "").lower() if self.blog else ""
         return self._cache["blog_host"]
 
     @property
     def twitter(self) -> str:
+        """
+        Return the user's Twitter/X username as listed on their profile. Cached
+        after first access.
+
+        Returns
+        =======
+        :twitter: str
+            the Twitter username, or an empty string if unavailable.
+        """
         if "twitter" not in self._cache:
             self._cache["twitter"] = self._get_basic("twitter_username", "") or ""
         return self._cache["twitter"]
 
     @property
     def bio(self) -> str:
+        """
+        Return the user's profile bio text. Cached after first access.
+
+        Returns
+        =======
+        :bio: str
+            the bio text, or an empty string if unavailable.
+        """
         if "bio" not in self._cache:
             self._cache["bio"] = self._get_basic("bio", "") or ""
         return self._cache["bio"]
 
     @property
     def avatar_url(self) -> str:
+        """
+        Return the URL of the user's avatar image. Cached after first access.
+
+        Returns
+        =======
+        :avatar_url: str
+            the avatar URL, or an empty string if unavailable.
+        """
         if "avatar_url" not in self._cache:
             self._cache["avatar_url"] = self._get_basic("avatar_url", "") or ""
         return self._cache["avatar_url"]
 
     @property
     def html_url(self) -> str:
+        """
+        Return the URL of the user's GitHub profile page. Cached after first
+        access.
+
+        Returns
+        =======
+        :html_url: str
+            the profile URL, or an empty string if unavailable.
+        """
         if "html_url" not in self._cache:
             self._cache["html_url"] = self._get_basic("html_url", "") or ""
         return self._cache["html_url"]
 
     @property
     def hireable(self) -> bool:
+        """
+        Return whether the user has flagged themselves as available for hire.
+        Cached after first access.
+
+        Returns
+        =======
+        :hireable: bool
+            True if the user is marked hireable, otherwise False.
+        """
         if "hireable" not in self._cache:
             self._cache["hireable"] = bool(self._get_basic("hireable", False))
         return self._cache["hireable"]
 
     @property
     def site_admin(self) -> bool:
+        """
+        Return whether the account is a GitHub site administrator. Cached after
+        first access.
+
+        Returns
+        =======
+        :site_admin: bool
+            True if the account is a site admin, otherwise False.
+        """
         if "site_admin" not in self._cache:
             self._cache["site_admin"] = bool(self._get_basic("site_admin", False))
         return self._cache["site_admin"]
 
     @property
     def created_at(self) -> str:
+        """
+        Return the account creation timestamp as an ISO-8601 string. Cached after
+        first access.
+
+        Returns
+        =======
+        :created_at: str
+            the creation timestamp, or an empty string if unavailable.
+        """
         if "created_at" not in self._cache:
             dt = self._get_basic("created_at", None)
             self._cache["created_at"] = dt.isoformat() if dt else ""
@@ -281,6 +553,15 @@ class GitHubUserInfo:
 
     @property
     def updated_at(self) -> str:
+        """
+        Return the account's last-updated timestamp as an ISO-8601 string. Cached
+        after first access.
+
+        Returns
+        =======
+        :updated_at: str
+            the last-updated timestamp, or an empty string if unavailable.
+        """
         if "updated_at" not in self._cache:
             dt = self._get_basic("updated_at", None)
             self._cache["updated_at"] = dt.isoformat() if dt else ""
@@ -288,30 +569,72 @@ class GitHubUserInfo:
 
     @property
     def followers(self) -> int:
+        """
+        Return the user's follower count. Cached after first access.
+
+        Returns
+        =======
+        :followers: int
+            number of followers (0 if unavailable).
+        """
         if "followers" not in self._cache:
             self._cache["followers"] = int(self._get_basic("followers", 0) or 0)
         return self._cache["followers"]
 
     @property
     def following(self) -> int:
+        """
+        Return the number of accounts the user follows. Cached after first
+        access.
+
+        Returns
+        =======
+        :following: int
+            number of accounts followed (0 if unavailable).
+        """
         if "following" not in self._cache:
             self._cache["following"] = int(self._get_basic("following", 0) or 0)
         return self._cache["following"]
 
     @property
     def public_repos(self) -> int:
+        """
+        Return the user's public repository count. Cached after first access.
+
+        Returns
+        =======
+        :public_repos: int
+            number of public repositories (0 if unavailable).
+        """
         if "public_repos" not in self._cache:
             self._cache["public_repos"] = int(self._get_basic("public_repos", 0) or 0)
         return self._cache["public_repos"]
 
     @property
     def public_gists(self) -> int:
+        """
+        Return the user's public gist count. Cached after first access.
+
+        Returns
+        =======
+        :public_gists: int
+            number of public gists (0 if unavailable).
+        """
         if "public_gists" not in self._cache:
             self._cache["public_gists"] = int(self._get_basic("public_gists", 0) or 0)
         return self._cache["public_gists"]
 
     @property
     def public_orgs(self) -> List[str]:
+        """
+        Return the list of organisation logins the user is publicly a member of.
+        Cached after first access.
+
+        Returns
+        =======
+        :public_orgs: list
+            list of organisation login strings (empty on error).
+        """
         if "public_orgs" not in self._cache:
             try:
                 orgs = [o.login for o in self._user().get_orgs()]
@@ -322,12 +645,30 @@ class GitHubUserInfo:
 
     @property
     def orgs_public_count(self) -> int:
+        """
+        Return the number of organisations the user is publicly a member of.
+        Cached after first access.
+
+        Returns
+        =======
+        :orgs_public_count: int
+            count of public organisation memberships.
+        """
         if "orgs_public_count" not in self._cache:
             self._cache["orgs_public_count"] = len(self.public_orgs)
         return self._cache["orgs_public_count"]
 
     @property
     def is_bot(self) -> bool:
+        """
+        Return whether the account is a bot, based on its type being ``"bot"`` or
+        its login ending in ``[bot]`` or ``-bot``. Cached after first access.
+
+        Returns
+        =======
+        :is_bot: bool
+            True if the account is identified as a bot, otherwise False.
+        """
         if "is_bot" not in self._cache:
             t = self.type.lower()
             self._cache["is_bot"] = (t == "bot") or self.login.endswith("[bot]") or self.login.endswith("-bot")
@@ -335,6 +676,15 @@ class GitHubUserInfo:
 
     @property
     def last_public_event_at(self) -> str:
+        """
+        Return the ISO-8601 timestamp of the user's most recent public event.
+        Cached after first access.
+
+        Returns
+        =======
+        :last_public_event_at: str
+            the timestamp of the last public event, or an empty string if none.
+        """
         if "last_public_event_at" not in self._cache:
             try:
                 ev = next(iter(self._user().get_public_events()), None)
@@ -345,6 +695,21 @@ class GitHubUserInfo:
 
     # ---------- heavier (optional) computations ----------
     def top_languages(self, max_repos: int = 50) -> List[Tuple[str, int]]:
+        """
+        Return the user's top three most-used programming languages, counted
+        across their owned repositories. **Expensive**: iterates up to
+        *max_repos* repositories. Result is cached per *max_repos* value.
+
+        Parameters
+        ==========
+        :max_repos: int (default=50)
+            maximum number of owned repositories to inspect.
+
+        Returns
+        =======
+        :top: list
+            list of up to three ``(language, count)`` tuples, most-used first.
+        """
         key = f"top_languages_{max_repos}"
         if key in self._cache:
             return self._cache[key]
@@ -361,6 +726,21 @@ class GitHubUserInfo:
         return top
 
     def star_fork_sums(self, max_repos: int = 50) -> Tuple[int, int]:
+        """
+        Return the total stars and forks summed across the user's owned
+        repositories. **Expensive**: iterates up to *max_repos* repositories.
+        Result is cached per *max_repos* value.
+
+        Parameters
+        ==========
+        :max_repos: int (default=50)
+            maximum number of owned repositories to inspect.
+
+        Returns
+        =======
+        :(stars, forks): tuple
+            tuple of the summed stargazer count and summed fork count.
+        """
         key = f"star_fork_sums_{max_repos}"
         if key in self._cache:
             return self._cache[key]
@@ -375,10 +755,17 @@ class GitHubUserInfo:
         return stars, forks
 
     def social_accounts(self) -> Dict[str, str]:
-        """Fetch social accounts via the GitHub REST API; returns provider -> url dict.
+        """
+        Fetch the user's linked social accounts via the GitHub REST API and
+        return them as a provider -> URL mapping. Uses ``requests.get`` directly
+        (rather than the private PyGithub requester) so it is stable across
+        PyGithub versions. Result is cached after first access.
 
-        Uses ``requests.get`` directly rather than the private PyGithub requester
-        so the call is stable across PyGithub versions.
+        Returns
+        =======
+        :result: dict
+            dict mapping each lower-cased provider name to its account URL
+            (empty on error or if the user has no linked accounts).
         """
         if "social_accounts" in self._cache:
             return self._cache["social_accounts"]
@@ -413,6 +800,20 @@ class GitHubUserInfo:
 
     # NEW — optional bounded counts (public data, but can be large: keep capped if you adapt)
     def ssh_keys_count(self, cap: int = 50) -> int:
+        """
+        Return the number of public SSH keys on the user's account, bounded by
+        *cap* to avoid unbounded pagination.
+
+        Parameters
+        ==========
+        :cap: int (default=50)
+            maximum number of keys to count.
+
+        Returns
+        =======
+        :count: int
+            number of public SSH keys (up to *cap*), or 0 on error.
+        """
         try:
             # PyGithub returns PaginatedList; slicing is efficient
             return len(self._user().get_keys()[:cap])
@@ -420,12 +821,40 @@ class GitHubUserInfo:
             return 0
 
     def gpg_keys_count(self, cap: int = 50) -> int:
+        """
+        Return the number of public GPG keys on the user's account, bounded by
+        *cap* to avoid unbounded pagination.
+
+        Parameters
+        ==========
+        :cap: int (default=50)
+            maximum number of keys to count.
+
+        Returns
+        =======
+        :count: int
+            number of public GPG keys (up to *cap*), or 0 on error.
+        """
         try:
             return len(self._user().get_gpg_keys()[:cap])
         except Exception:
             return 0
 
     def starred_repos_sampled(self, cap: int = 200) -> int:
+        """
+        Return a bounded sample count of the repositories the user has starred,
+        limited by *cap* to avoid unbounded pagination.
+
+        Parameters
+        ==========
+        :cap: int (default=200)
+            maximum number of starred repositories to count.
+
+        Returns
+        =======
+        :count: int
+            number of starred repositories sampled (up to *cap*), or 0 on error.
+        """
         try:
             return len(self._user().get_starred()[:cap])
         except Exception:
@@ -433,6 +862,25 @@ class GitHubUserInfo:
 
     # ---------- repo-specific (requires rights for private/collab info) ----------
     def repo_relationship(self, repo: 'Repository', check_permission: bool = True) -> Dict[str, Union[bool, str, None]]:
+        """
+        Determine the user's relationship to a specific repository: whether they
+        are a collaborator and, optionally, their permission level. Requires
+        sufficient rights on the repository; failures are swallowed and leave the
+        corresponding value unset.
+
+        Parameters
+        ==========
+        :repo: Repository
+            the PyGithub repository object to check the relationship against.
+        :check_permission: bool (default=True)
+            when True, also look up the user's permission level on the repo.
+
+        Returns
+        =======
+        :out: dict
+            dict with keys ``"is_collaborator"`` (bool/None) and
+            ``"permission_on_repo"`` (str).
+        """
         out = {"is_collaborator": None, "permission_on_repo": ""}
         try:
             out["is_collaborator"] = bool(repo.has_in_collaborators(self._user()))
@@ -460,16 +908,39 @@ class GitHubUserInfo:
         recent_days: int = 90,
         repo=None
     ) -> UserSnapshot:
-        """Collects all lightweight fields + optional aggregates into a dataclass.
+        """
+        Collect all lightweight fields (plus any requested optional aggregates)
+        into a single :class:`UserSnapshot` dataclass. Optional aggregates are
+        off by default because they can be expensive (one or more API calls per
+        repository).
 
         Parameters
-        ----------
-        include_langs:
-            Collect top-3 languages from the user's repositories.  **Expensive** — makes
-            one API call per repository up to *langs_max_repos*.  Off by default.
-        include_star_fork_sums:
-            Sum stars and forks across the user's repositories.  **Expensive** — same
-            cost as *include_langs*.  Off by default.
+        ==========
+        :include_langs: bool (default=False)
+            collect the top-3 languages from the user's repositories.
+            **Expensive** — one API call per repository up to *langs_max_repos*.
+        :include_star_fork_sums: bool (default=False)
+            sum stars and forks across the user's repositories.
+            **Expensive** — same cost profile as *include_langs*.
+        :langs_max_repos: int (default=50)
+            maximum repositories to inspect when *include_langs* is set.
+        :sums_max_repos: int (default=50)
+            maximum repositories to inspect when *include_star_fork_sums* is set.
+        :include_keys_counts: bool (default=False)
+            include bounded SSH and GPG public-key counts.
+        :include_star_sample: bool (default=False)
+            include a bounded sample count of starred repositories.
+        :include_social_accounts: bool (default=False)
+            include linked social accounts (one extra REST call per user).
+        :recent_days: int (default=90)
+            window, in days, used to compute the ``recently_active`` flag.
+        :repo: Repository/None (default=None)
+            if provided, also populate the repo-specific relationship fields.
+
+        Returns
+        =======
+        :snap: UserSnapshot
+            the fully populated snapshot dataclass for the user.
         """
         # Lightweight fields
         snap = UserSnapshot(
@@ -544,11 +1015,40 @@ class GitHubUserInfo:
 
     # Convenience: dict output
     def to_dict(self, **snapshot_kwargs) -> Dict[str, Any]:
+        """
+        Return the user's snapshot as a plain dict with keys sorted
+        alphabetically.
+
+        Parameters
+        ==========
+        :snapshot_kwargs: dict
+            keyword arguments forwarded to :meth:`snapshot` (e.g.
+            ``include_social_accounts=True``).
+
+        Returns
+        =======
+        :data: dict
+            the snapshot fields as a key-sorted dict.
+        """
         return dict(sorted(asdict(self.snapshot(**snapshot_kwargs)).items()))
-    
+
     # New export methods
     def to_csv_row(self, **snapshot_kwargs) -> List[str]:
-        """Export user data as CSV row."""
+        """
+        Return a selected subset of the user's snapshot fields as a list of
+        strings, suitable for writing as a single CSV row (see
+        :meth:`csv_headers` for the matching column order).
+
+        Parameters
+        ==========
+        :snapshot_kwargs: dict
+            keyword arguments forwarded to :meth:`snapshot`.
+
+        Returns
+        =======
+        :row: list
+            list of stringified field values in the CSV column order.
+        """
         snapshot = self.snapshot(**snapshot_kwargs)
         return [
             snapshot.login,
@@ -570,12 +1070,32 @@ class GitHubUserInfo:
         ]
 
     def to_json(self, **snapshot_kwargs) -> str:
-        """Export user data as JSON string."""
+        """
+        Return the user's snapshot as an indented JSON string.
+
+        Parameters
+        ==========
+        :snapshot_kwargs: dict
+            keyword arguments forwarded to :meth:`snapshot`.
+
+        Returns
+        =======
+        :json: str
+            the snapshot serialised as a pretty-printed JSON string.
+        """
         return json.dumps(self.to_dict(**snapshot_kwargs), indent=2, default=str)
-    
+
     @classmethod
     def csv_headers(cls) -> List[str]:
-        """Return CSV headers for to_csv_row method."""
+        """
+        Return the CSV column headers that correspond, in order, to the values
+        produced by :meth:`to_csv_row`.
+
+        Returns
+        =======
+        :headers: list
+            list of CSV column-name strings.
+        """
         return [
             "login", "name", "company", "location", "followers", "following",
             "public_repos", "public_gists", "created_at", "email", "blog", "bio",

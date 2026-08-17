@@ -1,6 +1,11 @@
 PyGithub>=2.0.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
-# Optional extras — install with: pip install repo-people[async] or repo-people[progress]
+# Optional extras — install with:
+#   pip install "repo-people[async]"     -> get_users_async()
+#   pip install "repo-people[excel]"     -> export_to_xlsx()
+#   pip install "repo-people[progress]"  -> progress=True
+# SQLite export needs no extra dependency (stdlib sqlite3).
 # aiohttp>=3.9
 # tqdm>=4.0
+# openpyxl>=3.1

@@ -1,8 +1,10 @@
 name: Deploy to PyPI 📦
 
+# Publishing authenticates with PYPI_TOKEN, not GITHUB_TOKEN, so this workflow
+# needs no write scope at all. `packages: write` was granting more than the job
+# ever used.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,13 +23,20 @@ jobs:
     name: Deploy to PyPI 📦
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    # The `branches: [main]` filter on workflow_run matches the *head* branch of
+    # the triggering run, so a fork PR opened from a branch named "main" would
+    # satisfy it. Require that the triggering run was not a pull_request too, so
+    # only a real push to main (or a manual dispatch) can reach the PyPI token.
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
 
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
 

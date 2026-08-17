@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "repo-people"
-version = "1.0.2"
+version = "1.1.0"
 description = "Collect and export full GitHub user profile data for everyone associated with a repository."
 authors = ["AJ McKenna <amckenna41@qub.ac.uk>"]
 maintainers = ["AJ McKenna <amckenna41@qub.ac.uk>"]
@@ -27,7 +27,7 @@ keywords = ["github", "users", "contributors", "stargazers", "watchers", "mainta
 packages = [{include = "repo_people"}]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.10"
 PyGithub = "^2.0.0"
 requests = "^2.31.0"
 beautifulsoup4 = "^4.12.0"

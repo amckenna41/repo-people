@@ -20,6 +20,7 @@ RepoPeople
        "watchers",
        "issue_authors",
        "pr_authors",
+       "pr_reviewers",
        "fork_owners",
        "commit_authors",
        "dependents",
@@ -32,7 +33,9 @@ RepoPeople
 .. code-block:: python
 
    repr(rp)
-   # "RepoPeople(owner='alice', repo='myrepo', outdir='outputs/alice_myrepo', valid_roles=9)"
+   # "RepoPeople(owner='alice', repo='myrepo', outdir='outputs', valid_roles=10)"
+
+The token is deliberately omitted from ``repr()``.
 
 .. rubric:: ``roles`` key in output
 
@@ -48,8 +51,10 @@ role(s) that user appeared under:
 .. note::
 
    ``"roles"`` is **not** a :class:`~repo_people.users.UserSnapshot` field —
-   it is injected by ``get_users`` after profile fetching. It will therefore
-   not appear in the snapshot field table below.
+   it is injected by ``get_users`` after profile fetching, so it does not appear
+   in the snapshot field table below. It *is* accepted by ``fields=``: the
+   allow-list is :meth:`~repo_people.RepoPeople.valid_fields`, which is the union
+   of the snapshot fields and ``"roles"``.
 
 
 UserSnapshot
@@ -82,7 +87,7 @@ every ``dict`` entry of the ``user_data`` mapping produced by
      - Global node ID (GraphQL).
    * - ``type``
      - ``str``
-     - Account type — ``"User"`` or ``"Bot"``.
+     - Account type — ``"User"``, ``"Organization"`` or ``"Bot"``.
    * - ``name``
      - ``str``
      - Display name on their profile.
@@ -91,13 +96,17 @@ every ``dict`` entry of the ``user_data`` mapping produced by
      - Raw company string from their profile.
    * - ``company_normalized``
      - ``str``
-     - Company with leading ``@`` stripped and lowercased.
+     - Company with leading ``@`` stripped and whitespace trimmed.
    * - ``location``
      - ``str``
      - Raw location string from their profile.
    * - ``location_normalized``
      - ``str``
-     - Location stripped of trailing country codes.
+     - Location trimmed and lowercased for consistent grouping.
+   * - ``location_country``
+     - ``str``
+     - Best-effort ISO 3166-1 alpha-2 country code from ``location``. Empty
+       string means *unknown*, not "no country".
    * - ``email_public``
      - ``str``
      - Public e-mail address (empty string if not set).
@@ -151,7 +160,7 @@ every ``dict`` entry of the ``user_data`` mapping produced by
      - Number of accounts they follow.
    * - ``followers_following_ratio``
      - ``float``
-     - ``followers / following`` (0 when ``following`` is 0).
+     - ``followers / following``, or ``followers`` when ``following`` is 0.
    * - ``public_repos``
      - ``int``
      - Number of public repositories.
@@ -175,13 +184,14 @@ every ``dict`` entry of the ``user_data`` mapping produced by
      - Days since account creation.
    * - ``repos_per_year``
      - ``float``
-     - ``public_repos / (account_age_days / 365)``.
+     - ``public_repos`` per year (365.25 days), with the divisor clamped to a
+       minimum of one year. Identical in the sync and async paths.
    * - ``recently_active``
      - ``bool``
      - ``True`` when ``last_public_event_at`` is within the last 90 days.
    * - ``top_languages``
      - ``list[tuple[str, int]] | None``
-     - Sampled (language, byte-count) pairs from their public repos.
+     - Up to three (language, repo-count) pairs from their owned repos.
    * - ``total_public_stars_sampled``
      - ``int | None``
      - Sum of stargazer counts across a sample of their public repos.
@@ -197,6 +207,10 @@ every ``dict`` entry of the ``user_data`` mapping produced by
    * - ``starred_repos_sampled``
      - ``int | None``
      - Number of repos they have starred (sampled).
+   * - ``social_accounts``
+     - ``dict[str, str] | None``
+     - Provider-to-URL map of linked social accounts. Populated only when
+       ``include_social_accounts=True``.
    * - ``is_collaborator``
      - ``bool | None``
      - Whether they have collaborator access on the queried repository.
@@ -224,11 +238,29 @@ Export Module
    :undoc-members: False
 
 Each function returns a list of strings (usernames) for *one* specific role.
-All nine functions share the same signature:
+They share a common signature shape:
 
 .. code-block:: python
 
-   export_<role>(gh: Github, owner: str, repo: str) -> list[str]
+   export_<role>(
+       owner: str,
+       repo: str,
+       token: str | None,
+       outdir: str,
+       return_data: bool = True,
+       export_csv: bool = False,
+       use_cache: bool = True,
+   ) -> list[str]
+
+``export_dependents`` takes no ``token`` (it scrapes the HTML dependents page)
+and additionally accepts ``limit`` and ``sleep``. ``export_maintainers`` takes
+``skip_codeowners`` and ``skip_collaborators``. ``export_pr_reviewers`` also
+accepts ``use_graphql``.
+
+.. note::
+
+   ``return_data`` is retained for backwards compatibility and is ignored — the
+   list is always returned.
 
 .. list-table:: Export functions
    :header-rows: 1
@@ -250,7 +282,53 @@ All nine functions share the same signature:
      - Usernames who have opened pull requests.
    * - ``export_fork_owners``
      - Usernames who have forked the repository.
+   * - ``export_pr_reviewers``
+     - Usernames who have reviewed a pull request. Uses GraphQL when a token is
+       available (one call per 100 PRs instead of one call per PR), falling back
+       to REST otherwise.
    * - ``export_commit_authors``
-     - Usernames extracted from commit history.
+     - Usernames extracted from commit history. An alias of
+       ``export_contributors``; the commit walk is memoised per repository so
+       requesting both roles costs one pass.
    * - ``export_dependents``
-     - Usernames of repositories that depend on this one.
+     - Usernames of repositories that depend on this one (HTML scrape).
+
+----
+
+Utils Module
+------------
+
+.. automodule:: repo_people.utils
+   :members: validate_owner_repo, normalize_country, paginate, graphql, clear_cache, write_csv, extract_token
+   :undoc-members: False
+
+.. rubric:: HTTP response cache
+
+:func:`~repo_people.utils.paginate` stores each page's ``ETag`` on disk and
+replays it as an ``If-None-Match`` header on subsequent runs. GitHub answers an
+unchanged page with ``304 Not Modified``, which does **not** count against the
+rate limit.
+
+The cache directory is ``$REPO_PEOPLE_CACHE_DIR`` if set, otherwise
+``$XDG_CACHE_HOME/repo-people`` (defaulting to ``~/.cache/repo-people``). Tokens
+are never stored, and the cache key deliberately excludes the token so entries
+are reusable across them. Cached *bodies* can still include private-repository
+membership, so the directory is created ``0700`` and entries are written
+``0600`` rather than inheriting the ambient umask. Clear it with
+:func:`~repo_people.utils.clear_cache` or ``repo-people --clear-cache``.
+
+.. rubric:: Rate limits versus authorisation failures
+
+GitHub returns 403 both when a rate limit is exhausted and when a request is
+simply not permitted. :func:`~repo_people.utils.paginate` retries only the
+former, identified by an exhausted ``X-RateLimit-Remaining``, a ``Retry-After``
+header, or a rate-limit message in the body. A permission 403 — a SAML-protected
+organisation, or a token missing a scope — raises immediately instead of being
+slept on and retried.
+
+.. rubric:: Country normalisation
+
+:func:`~repo_people.utils.normalize_country` is a heuristic lookup over country
+names, common abbreviations, major cities and US/Canadian subdivision codes — it
+is **not** a geocoder. Unrecognised input returns ``""``, which callers must read
+as *unknown*.

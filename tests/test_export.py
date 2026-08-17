@@ -31,6 +31,16 @@ def _mock_response(json_data, status_code=200, link_header=""):
 class ExportUnitTests(unittest.TestCase):
     """Mock-based unit tests for individual export_* functions."""
 
+    def setUp(self):
+        # These tests all drive the memoised commit walk against the same
+        # ("o", "r") repository, so a leftover memo entry serves one test's
+        # mocked payload to the next. tests/__init__.py clears the memo around
+        # every test, but that module is not imported when this file is run
+        # directly as a script (``python tests/test_export.py``), so the class
+        # that actually depends on the reset asks for it explicitly too.
+        export.clear_commit_author_cache()
+        self.addCleanup(export.clear_commit_author_cache)
+
     def test_export_contributors_return_data(self):
         """export_contributors with return_data=True returns list of logins."""
         # /commits endpoint returns commit objects with nested author
@@ -281,12 +291,27 @@ class ExportUnitTests(unittest.TestCase):
         # Only one HTTP request should be made (no next page)
         mock_get.assert_called_once()
 
-    def test_persistent_403_is_retried_a_bounded_number_of_times(self):
-        """A 403 with no rate-limit headers must not loop forever (regression)."""
+    def test_permission_403_is_not_retried(self):
+        """A 403 with no rate-limit signal is a permission error: raise at once."""
         import requests as _requests
         resp = _mock_response([], status_code=403)
-        resp.headers = {}  # no X-RateLimit-Reset / Retry-After -> short fixed backoff path
-        # Once retries are exhausted, a real Response would raise on raise_for_status().
+        resp.headers = {}  # no X-RateLimit-Remaining: 0, no Retry-After
+        resp.raise_for_status.side_effect = _requests.exceptions.HTTPError("403")
+        with patch("repo_people.utils.requests.get", return_value=resp) as mock_get, \
+             patch("repo_people.utils.time.sleep") as mock_sleep:
+            with self.assertRaises(_requests.exceptions.HTTPError):
+                list(export.paginate("https://api.github.com/x", token=None))
+        # Sleeping and retrying a SAML/scope 403 burned ~50s before surfacing the
+        # same error. One request, no sleeps.
+        self.assertEqual(mock_get.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_persistent_ratelimit_403_is_retried_a_bounded_number_of_times(self):
+        """A genuine rate-limit 403 is retried, but must not loop forever."""
+        import requests as _requests
+        resp = _mock_response([], status_code=403)
+        # An exhausted quota with no reset header -> short fixed backoff path.
+        resp.headers = {"X-RateLimit-Remaining": "0"}
         resp.raise_for_status.side_effect = _requests.exceptions.HTTPError("403")
         with patch("repo_people.utils.requests.get", return_value=resp) as mock_get, \
              patch("repo_people.utils.time.sleep"):
@@ -294,6 +319,23 @@ class ExportUnitTests(unittest.TestCase):
                 list(export.paginate("https://api.github.com/x", token=None))
         # 1 initial request + 5 capped retries = 6; then it gives up rather than looping.
         self.assertEqual(mock_get.call_count, 6)
+
+    def test_secondary_ratelimit_403_detected_from_body(self):
+        """Secondary limits can arrive with no headers, only a message body."""
+        from repo_people.utils import _is_ratelimit_response
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.headers = {}
+        resp.json.return_value = {"message": "You have exceeded a secondary rate limit"}
+        self.assertTrue(_is_ratelimit_response(resp))
+
+    def test_plain_403_body_is_not_a_ratelimit(self):
+        from repo_people.utils import _is_ratelimit_response
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.headers = {}
+        resp.json.return_value = {"message": "Resource protected by organization SAML enforcement"}
+        self.assertFalse(_is_ratelimit_response(resp))
 
 
 # ---------------------------------------------------------------------------

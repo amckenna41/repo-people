@@ -54,6 +54,22 @@ Run with coverage:
 
    pytest tests/ --cov=repo_people --cov-report=term-missing
 
+The suite also runs under the standard-library runner, which is useful when
+pytest is not installed:
+
+.. code-block:: console
+
+   python -m unittest discover -s tests -t .
+   python -m unittest tests.test_export
+
+.. note::
+
+   Shared test setup lives in ``tests/__init__.py``, not ``conftest.py``.
+   ``conftest.py`` is pytest-only, so isolation placed there silently stops
+   applying under ``unittest`` — which previously let the process-wide
+   commit-author memo leak between tests. Put anything the whole suite relies on
+   in the package ``__init__``.
+
 Integration Tests
 ~~~~~~~~~~~~~~~~~
 

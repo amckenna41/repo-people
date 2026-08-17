@@ -17,6 +17,15 @@ on:
   #allow for workflow to be manually initiated from the Actions tab
   workflow_dispatch:
 
+# Least privilege. Without an explicit block, jobs inherit whatever the
+# repository default is — which may be read/write on every scope.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   #build and test repo-people
   build_test:
@@ -31,7 +40,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python-version }} #checkout repo
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }} #install python version
 
@@ -62,7 +71,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -71,25 +80,34 @@ jobs:
       run: mkdir artifacts
 
     #package vulnerability check
+    # `safety check` is deprecated in favour of `safety scan`; fall back to the
+    # old subcommand so this keeps working on either version.
     - name: Package safety check
       run: |
         echo "Running package safety check"
         pip install safety PyGithub requests beautifulsoup4 "aiohttp>=3.9"
-        python3 -m safety check > artifacts/package_safety_output.txt
+        python3 -m safety scan --output text > artifacts/package_safety_output.txt 2>&1 \
+          || python3 -m safety check > artifacts/package_safety_output.txt 2>&1
         cat artifacts/package_safety_output.txt
       continue-on-error: true
 
     #run Bandit security check for any known vulnerabilities in code
+    # Fails the job on medium-or-higher findings. This step used to be
+    # continue-on-error, which meant the security gate could never actually block
+    # anything — a report nobody reads is not a control. The report is still
+    # uploaded as an artifact either way.
     - name: Bandit
       run: |
         echo "Running Bandit"
         pip install bandit
-        python3 -m bandit -r repo_people tests -v > artifacts/bandit_output.txt
-        cat artifacts/bandit_output.txt
-      continue-on-error: true
+        python3 -m bandit -r repo_people -v --severity-level medium \
+          | tee artifacts/bandit_output.txt
 
     #upload test artifacts to workflow
+    # always(): the Bandit step is now blocking, and the report is most useful
+    # precisely when it failed.
     - name: Upload Test Artifacts
+      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: test_artifacts

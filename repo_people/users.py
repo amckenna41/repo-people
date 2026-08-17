@@ -11,6 +11,8 @@ from github.GithubObject import IncompletableObject
 from github.GithubException import RateLimitExceededException
 import json
 
+from .utils import USER_AGENT, _is_bot, extract_token, normalize_country
+
 if TYPE_CHECKING:
     from github.Repository import Repository
 
@@ -57,6 +59,9 @@ class UserSnapshot:
     has_twitter: bool = False
     company_normalized: str = ""
     location_normalized: str = ""
+    # Best-effort ISO 3166-1 alpha-2 code derived from the free-text location.
+    # Empty string means "could not be determined", not "no country".
+    location_country: str = ""
 
     # NEW — small computed metrics
     account_age_days: int = 0
@@ -123,6 +128,12 @@ class GitHubUserInfo:
                 self._gh = Github()
         else:
             self._gh = gh
+
+        # Keep the raw token for the direct REST calls that bypass PyGithub (see
+        # social_accounts). Prefer the explicit argument, otherwise recover it
+        # from the client we were handed — without this, those calls silently go
+        # out unauthenticated and get rate limited after 60 requests/hour.
+        self._token = token or extract_token(self._gh)
 
         self._user_obj: Optional[NamedUser] = user_obj
         self._username = username or (user_obj.login if user_obj else None)
@@ -211,6 +222,18 @@ class GitHubUserInfo:
         """
         return (self.location or "").strip().lower()
 
+    def _location_country(self) -> str:
+        """
+        Return a best-effort ISO 3166-1 alpha-2 country code for the user's
+        free-text location (see :func:`~repo_people.utils.normalize_country`).
+
+        Returns
+        =======
+        :country: str
+            an alpha-2 country code, or ``""`` when it cannot be determined.
+        """
+        return normalize_country(self.location)
+
     def _days_since(self, iso: str) -> int:
         """
         Return the whole number of days between an ISO-8601 timestamp and now
@@ -250,17 +273,22 @@ class GitHubUserInfo:
     def _repos_per_year(self) -> float:
         """
         Return the user's average number of public repositories created per year,
-        based on account age (a minimum of one day is used to avoid division by
-        zero on brand-new accounts).
+        based on account age.
+
+        Accounts younger than a year are treated as one year old so that a
+        brand-new account with a handful of repos does not report an absurd rate
+        (and so division by zero is impossible). The async path in
+        ``repo_people.py`` applies the identical formula — the two must agree or
+        the same user yields different numbers depending on which API was used.
 
         Returns
         =======
         :repos_per_year: float
             public repos per year, rounded to 2 decimal places.
         """
-        days = max(1, self._days_since(self.created_at))
-        years = days / 365.25
-        return round(self.public_repos / years, 2) if years else float(self.public_repos)
+        days = self._days_since(self.created_at)
+        years = max(days / 365.25, 1.0)
+        return round(self.public_repos / years, 2)
 
     def _recently_active(self, days: int = 90) -> bool:
         """
@@ -670,8 +698,10 @@ class GitHubUserInfo:
             True if the account is identified as a bot, otherwise False.
         """
         if "is_bot" not in self._cache:
-            t = self.type.lower()
-            self._cache["is_bot"] = (t == "bot") or self.login.endswith("[bot]") or self.login.endswith("-bot")
+            # Delegate to the shared helper rather than restating the rule here.
+            # This property and utils._is_bot() had drifted apart once already,
+            # and the async pipeline calls the helper directly.
+            self._cache["is_bot"] = _is_bot(self.login, self.type)
         return self._cache["is_bot"]
 
     @property
@@ -758,34 +788,28 @@ class GitHubUserInfo:
         """
         Fetch the user's linked social accounts via the GitHub REST API and
         return them as a provider -> URL mapping. Uses ``requests.get`` directly
-        (rather than the private PyGithub requester) so it is stable across
-        PyGithub versions. Result is cached after first access.
+        because PyGithub exposes no accessor for this endpoint. Result is cached
+        after first access.
+
+        The token is taken from ``self._token``, which is resolved once at
+        construction (see :meth:`__init__`). A non-200 response is reported
+        rather than silently swallowed, since an unauthenticated or rate-limited
+        call here previously produced an empty result with no explanation.
 
         Returns
         =======
         :result: dict
             dict mapping each lower-cased provider name to its account URL
-            (empty on error or if the user has no linked accounts).
+            (empty if the user has no linked accounts, or on error).
         """
         if "social_accounts" in self._cache:
             return self._cache["social_accounts"]
         result: Dict[str, str] = {}
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        url = f"https://api.github.com/users/{self.login}/social_accounts"
         try:
-            token = None
-            try:
-                # Extract the token from the underlying PyGithub requester if available
-                requester = getattr(self._gh, "_Github__requester", None)
-                token = getattr(requester, "_Requester__authorizationHeader", None)
-                if token and token.startswith("Bearer "):
-                    token = token[len("Bearer "):]
-                elif token and token.startswith("token "):
-                    token = token[len("token "):]
-            except Exception:
-                pass
-            headers = {"Accept": "application/vnd.github+json", "User-Agent": "repo-people/1.0"}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            url = f"https://api.github.com/users/{self.login}/social_accounts"
             resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 for entry in resp.json() or []:
@@ -793,8 +817,17 @@ class GitHubUserInfo:
                     acct_url = entry.get("url") or ""
                     if provider and acct_url:
                         result[provider] = acct_url
-        except Exception:
-            pass
+            elif resp.status_code == 404:
+                # User has no social accounts configured — a normal empty result.
+                pass
+            else:
+                print(
+                    f"  [WARNING] social_accounts for {self.login}: "
+                    f"HTTP {resp.status_code}"
+                    + ("" if self._token else " (no token — 60 requests/hour limit)")
+                )
+        except Exception as exc:
+            print(f"  [WARNING] social_accounts for {self.login} failed: {exc}")
         self._cache["social_accounts"] = result
         return result
 
@@ -979,6 +1012,7 @@ class GitHubUserInfo:
         snap.has_twitter = bool(snap.twitter)
         snap.company_normalized = self._normalized_company()
         snap.location_normalized = self._normalized_location()
+        snap.location_country = self._location_country()
 
         # NEW — small computed metrics
         snap.account_age_days = self._days_since(snap.created_at)

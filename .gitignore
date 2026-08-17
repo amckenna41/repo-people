@@ -214,6 +214,17 @@ ARTICLE.md
 
 tests/test_output/
 
+# Collected output. These files contain other people's personal data — public
+# emails, locations, employers, bios — scraped from the GitHub API. Never commit
+# them: a routine `git add .` would otherwise publish a PII dataset.
+outputs/
+*_user_details.json
+*_user_details.jsonl
+*_user_details.csv
+*_user_details.xlsx
+*_user_details.md
+*_user_details.db
+
 node_modules/
 
 TODO.md

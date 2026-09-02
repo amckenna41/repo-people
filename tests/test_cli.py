@@ -129,6 +129,14 @@ class TestCliMain(unittest.TestCase):
             main(["owner", "repo"])
         mock_rp.get_users.assert_called_once()
 
+    def test_dry_run_estimates_and_skips_fetching(self):
+        mock_rp = self._mock_rp()
+        with patch("repo_people.cli.RepoPeople", return_value=mock_rp):
+            code = main(["owner", "repo", "--dry-run", "--limit", "5"])
+        self.assertEqual(code, 0)
+        mock_rp.get_users.assert_not_called()
+        self.assertEqual(mock_rp.dry_run.call_args[1]["limit"], 5)
+
     def test_main_passes_export_json(self):
         mock_rp = self._mock_rp()
         with patch("repo_people.cli.RepoPeople", return_value=mock_rp):

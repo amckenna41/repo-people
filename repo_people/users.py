@@ -136,6 +136,7 @@ class GitHubUserInfo:
         self._token = token or extract_token(self._gh)
 
         self._user_obj: Optional[NamedUser] = user_obj
+        self._user_fetch_failed = False
         self._username = username or (user_obj.login if user_obj else None)
         self._cache: Dict[str, Any] = {}
 
@@ -146,12 +147,17 @@ class GitHubUserInfo:
         from the API on first access. Fetch failures are logged and result in
         None rather than raising.
 
+        The failure is cached as well as the success: ``get_user()`` is not lazy
+        in PyGithub (it calls ``.complete()``), so without a "already tried"
+        marker every one of the ~20 properties that a snapshot reads would
+        re-issue the same doomed request for a deleted or suspended login.
+
         Returns
         =======
         :_user_obj: NamedUser/None
             the resolved user object, or None if it could not be fetched.
         """
-        if self._user_obj is None:
+        if self._user_obj is None and not self._user_fetch_failed:
             try:
                 self._user_obj = self._gh.get_user(self._username)
                 if self._user_obj is None:
@@ -159,6 +165,7 @@ class GitHubUserInfo:
             except Exception as e:
                 print(f"[DEBUG] Failed to get user {self._username}: {e}")
                 self._user_obj = None
+            self._user_fetch_failed = self._user_obj is None
         return self._user_obj
 
     def _get_basic(self, attr: str, default=None):

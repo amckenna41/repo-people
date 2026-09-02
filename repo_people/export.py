@@ -769,9 +769,11 @@ def collect_simple_roles_graphql(
     Returns
     =======
     :results: dict/None
-        dict mapping each supported requested role to its sorted list of unique
-        logins, or None when GraphQL is unavailable and the caller should fall
-        back to REST.
+        dict mapping each *completed* role to its sorted list of unique logins,
+        or None when GraphQL is unavailable and the caller should fall back to
+        REST for everything. On a mid-pagination failure the roles that had
+        already finished are still returned, so only the unfinished ones are
+        re-walked over REST.
     """
     wanted = [r for r in roles if r in _SIMPLE_ROLE_CONNECTIONS]
     if not token or not wanted:
@@ -780,6 +782,11 @@ def collect_simple_roles_graphql(
     found: Dict[str, set] = {role: set() for role in wanted}
     cursors: Dict[str, Optional[str]] = {role: None for role in wanted}
     active = list(wanted)
+    done: List[str] = []
+
+    def _partial():
+        """Completed roles only — None when nothing finished, so the caller falls back."""
+        return {role: sorted(found[role]) for role in done} if done else None
 
     while active:
         # Rebuild the document each round with only the connections still paging,
@@ -791,10 +798,10 @@ def collect_simple_roles_graphql(
 
         data = graphql(query, variables, token)
         if not data:
-            return None
+            return _partial()
         repository = data.get("repository")
         if not repository:
-            return None
+            return _partial()
 
         still_active = []
         for role in active:
@@ -810,6 +817,8 @@ def collect_simple_roles_graphql(
             if page_info.get("hasNextPage") and page_info.get("endCursor"):
                 cursors[role] = page_info["endCursor"]
                 still_active.append(role)
+            else:
+                done.append(role)
         active = still_active
 
     return {role: sorted(found[role]) for role in wanted}

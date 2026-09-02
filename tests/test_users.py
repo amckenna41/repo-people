@@ -151,6 +151,16 @@ class TestGitHubUserInfoInit(unittest.TestCase):
             GitHubUserInfo(username="alice")
         mock_cls.assert_called_once()
 
+    def test_failed_fetch_is_not_retried_per_property(self):
+        """A deleted/suspended login costs one request, not one per property."""
+        gh = MagicMock()
+        gh.get_user.side_effect = Exception("404 Not Found")
+        info = GitHubUserInfo(gh=gh, username="ghost")
+        for _ in range(5):
+            self.assertEqual(info.name, "")
+            self.assertEqual(info.company, "")
+        gh.get_user.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Basic property tests

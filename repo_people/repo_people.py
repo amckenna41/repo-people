@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from github import Github, Auth
 from typing import Optional, List, Dict, Set, Union
 from .users import GitHubUserInfo
-from .utils import validate_owner_repo, _is_bot, normalize_country
+from .utils import USER_AGENT, validate_owner_repo, _is_bot, normalize_country
 from . import export
 
 __all__ = ["RepoPeople", "UserDataView"]
@@ -27,6 +27,37 @@ __all__ = ["RepoPeople", "UserDataView"]
 # suppressing ResourceWarning (as an earlier version did) silently disabled it
 # for the whole importing application, hiding real unclosed-socket bugs.
 logging.getLogger("github.Requester").setLevel(logging.ERROR)
+
+
+async def _is_ratelimit_403(response) -> bool:
+    """
+    Return whether an aiohttp 403 response is genuinely a rate limit.
+
+    The aiohttp mirror of :func:`utils._is_ratelimit_response` — same rules
+    (exhausted ``X-RateLimit-Remaining``, a ``Retry-After`` header, or a
+    rate-limit message in the body), but reading ``.status`` and awaiting
+    ``.json()`` instead of the requests spelling.
+
+    Parameters
+    ==========
+    :response: aiohttp.ClientResponse
+        the 403 response to classify.
+
+    Returns
+    =======
+    :is_ratelimit: bool
+        True when the response should be retried as a rate limit, else False.
+    """
+    headers = response.headers or {}
+    if headers.get("X-RateLimit-Remaining") == "0" or headers.get("Retry-After"):
+        return True
+    # Secondary rate limits can arrive with neither header set, identifiable
+    # only by the message body.
+    try:
+        body = await response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and "rate limit" in str(body.get("message", "")).lower()
 
 
 def _iso_utc(timestamp: str) -> str:
@@ -1407,6 +1438,115 @@ class RepoPeople:
             "unchanged": sorted(old_logins & new_logins),
         }
 
+    # Profile, orgs and last public event — one REST call each per user (see
+    # GitHubUserInfo.to_dict), plus one more when social accounts are requested.
+    _REQUESTS_PER_USER = 3
+
+    def dry_run(
+        self,
+        roles: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        exclude: Optional[List[str]] = None,
+        exclude_bots: bool = False,
+        include_social_accounts: bool = False,
+        verbose: bool = True,
+    ) -> dict:
+        """
+        Run step 1 only and report what step 2 would cost, so a long run can be
+        narrowed with ``--roles``/``--limit`` before it is committed to.
+
+        Collecting the usernames still costs API calls (that is the only way to
+        know how many users there are), but the per-user profile fetch — by far
+        the larger spend — is not started. The estimate assumes
+        :data:`_REQUESTS_PER_USER` REST calls per user, plus one when
+        *include_social_accounts* is set.
+
+        Parameters
+        ==========
+        :roles: list/None (default=None)
+            role names to collect; None means every role.
+        :limit: int/None (default=None)
+            maximum number of users that would be fetched in step 2.
+        :exclude: list/None (default=None)
+            logins that would be skipped.
+        :exclude_bots: bool (default=False)
+            when True, bot-looking logins are screened out before fetching.
+        :include_social_accounts: bool (default=False)
+            when True, adds one REST call per user to the estimate.
+        :verbose: bool (default=True)
+            when True, print the report; the dict is returned either way.
+
+        Returns
+        =======
+        :estimate: dict
+            ``role_counts``, ``unique_users``, ``users_to_fetch``,
+            ``estimated_requests``, ``rate_limit_remaining`` (None when the
+            readout is unavailable) and ``fits_in_rate_limit``.
+        """
+        def _remaining():
+            try:
+                return self.gh.rate_limiting[0]
+            except Exception:
+                return None
+
+        before = _remaining()
+        if verbose:
+            print(f"Dry run for {self.owner}/{self.repo} — collecting usernames only...")
+        username_groups = self.collect_all_usernames(roles=roles)
+
+        unique = {login for logins in username_groups.values() for login in logins if login}
+
+        # Same screen as get_user_details, so the count matches what a real run
+        # would actually fetch.
+        exclude_set = set(exclude or [])
+        filtered = [
+            login for login in sorted(unique)
+            if login not in exclude_set and not (exclude_bots and _is_bot(login))
+        ]
+        filtered = filtered[:limit] if limit is not None else filtered
+
+        per_user = self._REQUESTS_PER_USER + (1 if include_social_accounts else 0)
+        estimated = len(filtered) * per_user
+        after = _remaining()
+        remaining = after
+        spent = (before - after) if (before is not None and after is not None) else None
+
+        estimate = {
+            "role_counts": {role: len(logins) for role, logins in username_groups.items()},
+            "unique_users": len(unique),
+            "users_to_fetch": len(filtered),
+            "estimated_requests": estimated,
+            "rate_limit_remaining": remaining,
+            "fits_in_rate_limit": None if remaining is None else estimated <= remaining,
+        }
+
+        if verbose:
+            width = max((len(r) for r in estimate["role_counts"]), default=0)
+            for role, count in sorted(
+                estimate["role_counts"].items(), key=lambda kv: -kv[1]
+            ):
+                print(f"  {role:<{width}}  {count}")
+            print(f"Unique users: {len(unique)}")
+            if len(filtered) != len(unique):
+                print(f"After exclude/limit filters: {len(filtered)}")
+            if spent:
+                # GraphQL points come out of a separate hourly budget, so the core
+                # spend below only counts the REST calls step 1 made.
+                print(f"Step 1 spent {spent} core REST request(s).")
+            print(
+                f"Step 2 estimate: ~{estimated} REST requests "
+                f"({per_user} per user x {len(filtered)} users)"
+            )
+            self._print_rate_limit_status()
+            if estimate["fits_in_rate_limit"] is False:
+                affordable = max(0, remaining // per_user)
+                print(
+                    f"Over budget: narrow --roles or use --limit {affordable} "
+                    f"to fit the current window."
+                )
+            print("Dry run — no user profiles fetched.")
+        return estimate
+
     def get_users(
         self,
         export: bool = False,
@@ -1700,7 +1840,7 @@ class RepoPeople:
         # Build auth headers for raw REST calls
         headers = {
             "Accept": "application/vnd.github+json",
-            "User-Agent": "repo-people/async",
+            "User-Agent": USER_AGENT,
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -1745,6 +1885,12 @@ class RepoPeople:
                     async with session.get(url, headers=headers, params=params) as r:
                         if r.status == 200:
                             return await r.json(), None
+                        if r.status == 403 and not await _is_ratelimit_403(r):
+                            # Same classification as utils._is_ratelimit_response:
+                            # an ordinary permission failure (SAML org, missing
+                            # scope, blocked account) must fail fast rather than
+                            # be slept on and retried five times.
+                            return None, "forbidden (HTTP 403)"
                         if r.status in (403, 429):
                             # Honour the reset/retry headers, bounded like the sync path.
                             reset = r.headers.get("X-RateLimit-Reset")

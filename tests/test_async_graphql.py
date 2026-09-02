@@ -139,7 +139,12 @@ class TestAsyncRateLimitHandling(unittest.TestCase):
         session = _FakeSession({
             "/users/alice/orgs": _FakeResponse([], 200),
             "/users/alice/events/public": _FakeResponse([], 200),
-            "/users/alice": _FakeResponse(None, 403, {"X-RateLimit-Reset": "99999999999"}),
+            # Remaining: 0 is what marks a primary rate limit; a 403 without it
+            # is a permission error and now fails fast instead.
+            "/users/alice": _FakeResponse(
+                None, 403,
+                {"X-RateLimit-Reset": "99999999999", "X-RateLimit-Remaining": "0"},
+            ),
         })
         with patch("aiohttp.ClientSession", return_value=session):
             with patch("builtins.print") as mock_print:
@@ -163,6 +168,28 @@ class TestAsyncRateLimitHandling(unittest.TestCase):
                 asyncio.run(self.rp.get_user_details_async(["ghost"], verbose=False))
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         self.assertIn("404", printed)
+
+    def test_permission_403_fails_fast(self):
+        """A 403 that is not a rate limit must not be slept on and retried."""
+        forbidden = _FakeResponse({"message": "Forbidden"}, 403)
+        session = _FakeSession({
+            "/users/alice/orgs": _FakeResponse([], 200),
+            "/users/alice/events/public": _FakeResponse([], 200),
+            "/users/alice": forbidden,
+        })
+        with patch("aiohttp.ClientSession", return_value=session):
+            with patch("asyncio.sleep", new=self._noop_sleep) as _:
+                with patch("builtins.print") as mock_print:
+                    result = asyncio.run(
+                        self.rp.get_user_details_async(["alice"], verbose=False)
+                    )
+        self.assertEqual(result, {})
+        self.assertEqual(self.rp.last_failed, ["alice"])
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("forbidden", printed)
+        self.assertNotIn("rate limit", printed)
+        # One attempt per URL, not five retries of the profile call.
+        self.assertEqual(session.requests.count("https://api.github.com/users/alice"), 1)
 
     def test_concurrency_capped_with_warning(self):
         session = _FakeSession({})
@@ -443,6 +470,26 @@ class TestCollectSimpleRolesGraphql(unittest.TestCase):
         self.assertIsNone(
             export.collect_simple_roles_graphql("o", "r", "tok", ["dependents"])
         )
+
+    def test_partial_results_survive_a_mid_pagination_failure(self):
+        """A finished role is kept; only the unfinished one falls back to REST."""
+        page1 = {
+            "repository": {
+                "stargazers": {
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                    "nodes": [{"login": "alice"}],
+                },
+                "watchers": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [{"login": "wendy"}],
+                },
+            }
+        }
+        with patch("repo_people.export.graphql", side_effect=[page1, None]):
+            result = export.collect_simple_roles_graphql(
+                "o", "r", "tok", ["stargazers", "watchers"]
+            )
+        self.assertEqual(result, {"watchers": ["wendy"]})
 
 
 class TestPrReviewersGraphql(unittest.TestCase):

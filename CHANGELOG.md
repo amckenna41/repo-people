@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2026-08-31
+
+### Added
+
+- **Pre-flight cost estimate (`RepoPeople.dry_run()` / `--dry-run`)** — collects usernames only, then reports per-role counts, the number of users a real run would fetch (after `--exclude`/`--exclude-bots`/`--limit`) and the estimated request budget for the profile fetch (3 REST calls per user, 4 with `--include-social-accounts`) against the current rate-limit window. Over budget, it suggests the `--limit` that fits. Returns the estimate as a dict for library callers.
+
+### Fixed
+
+- **A single unfetchable user cost ~20 API calls instead of 1** — `GitHubUserInfo._user()` cached only successful fetches, so for a deleted or suspended login each of the ~20 properties a snapshot reads re-issued the same failing `get_user()` request (PyGithub's `get_user()` is not lazy — it calls `.complete()`). The failure is now cached too, and a bad login costs one request and one `[DEBUG]` line.
+- **The async user-fetch path treated every 403 as a rate limit** — the bug `utils._is_ratelimit_response()` was added to fix for `paginate()` in 1.0.1 was still present in `get_user_details_async()`, where a permission failure (SAML-protected org, missing scope, blocked account) was slept on and retried five times. 403s are now classified by the same rules (exhausted `X-RateLimit-Remaining`, `Retry-After`, or a rate-limit message in the body) and anything else fails immediately.
+- **GraphQL fast-path failure discarded already-collected roles** — `collect_simple_roles_graphql()` returned `None` on any failed page, throwing away the roles that had already finished paging and re-walking all of them over REST. It now returns the completed roles, so only the unfinished ones fall back.
+- **Async path's User-Agent** — `get_user_details_async()` hardcoded a fourth value instead of `utils.USER_AGENT`, the inconsistency 1.1.0 was meant to close.
+
+---
+
 ## [1.1.0] - 2026-07-26
 
 ### Security

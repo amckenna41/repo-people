@@ -1535,6 +1535,48 @@ class TestDiffSnapshots(unittest.TestCase):
         self.assertEqual(result["unchanged"], sorted(result["unchanged"]))
 
 
+class TestDryRun(unittest.TestCase):
+    """dry_run reports the step-2 budget without fetching any profiles."""
+
+    def setUp(self):
+        self.gh_patcher = patch("repo_people.repo_people.Github")
+        mock_github_cls = self.gh_patcher.start()
+        mock_github_cls.return_value.get_repo.return_value = MagicMock()
+        mock_github_cls.return_value.rate_limiting = (4000, 5000)
+        self.rp = RepoPeople(owner="o", repo="r", token="tok")
+
+    def tearDown(self):
+        self.gh_patcher.stop()
+
+    def _dry_run(self, **kwargs):
+        with patch("repo_people.repo_people.export") as mock_export:
+            _stub_export(mock_export, ["alice", "bob", "somebot"])
+            with patch.object(RepoPeople, "get_user_details") as mock_fetch:
+                estimate = self.rp.dry_run(roles=["stargazers"], verbose=False, **kwargs)
+        mock_fetch.assert_not_called()
+        return estimate
+
+    def test_counts_and_budget(self):
+        estimate = self._dry_run()
+        self.assertEqual(estimate["role_counts"], {"stargazers": 3})
+        self.assertEqual(estimate["users_to_fetch"], 3)
+        self.assertEqual(estimate["estimated_requests"], 3 * RepoPeople._REQUESTS_PER_USER)
+        self.assertTrue(estimate["fits_in_rate_limit"])
+
+    def test_filters_and_social_accounts_change_the_estimate(self):
+        estimate = self._dry_run(
+            limit=1, exclude_bots=True, include_social_accounts=True
+        )
+        # somebot screened out, then limit=1 => one user at 4 calls each.
+        self.assertEqual(estimate["users_to_fetch"], 1)
+        self.assertEqual(estimate["estimated_requests"], RepoPeople._REQUESTS_PER_USER + 1)
+
+    def test_over_budget_is_flagged(self):
+        self.rp.gh.rate_limiting = (2, 5000)
+        estimate = self._dry_run()
+        self.assertFalse(estimate["fits_in_rate_limit"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

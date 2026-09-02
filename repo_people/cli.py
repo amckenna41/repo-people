@@ -184,6 +184,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable the GraphQL fast paths and use REST only.",
     )
 
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Collect usernames only, then report per-role counts and the estimated "
+            "request budget for the profile fetch, without fetching any profiles."
+        ),
+    )
+
     # --- output ---
     parser.add_argument(
         "--summarise",
@@ -324,6 +333,20 @@ def main(argv=None) -> int:
         fields=args.fields,
         include_social_accounts=args.include_social_accounts,
     )
+
+    if args.dry_run:
+        try:
+            rp.dry_run(
+                roles=args.roles,
+                limit=args.limit,
+                exclude=args.exclude,
+                exclude_bots=args.exclude_bots,
+                include_social_accounts=args.include_social_accounts,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return 0
 
     try:
         if args.use_async:
